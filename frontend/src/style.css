@@ -731,7 +731,7 @@ td {
   font-weight: 400;
   color: #718099;
 }
-.credit-summary > button {
+.timetable-actions {
   margin-left: auto;
 }
 .week-wrap {
@@ -770,6 +770,11 @@ td {
   color: #65538f;
   margin-bottom: 10px;
   border-radius: 6px;
+}
+.class-block.pending {
+  background: #fff3d8;
+  border-left-color: #bd8a32;
+  color: #805715;
 }
 .class-block span,
 .class-block small {
@@ -905,6 +910,135 @@ td {
   text-align: center;
   color: #7f7893;
   font-size: 0.8rem;
+}
+.message.has-recommendation {
+  width: 100%;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.recommendation {
+  display: grid;
+  gap: 20px;
+  margin-top: 16px;
+}
+.recommendation h4,
+.recommendation h5 {
+  margin: 0 0 8px;
+  color: var(--ink);
+}
+.recommendation p {
+  margin: 6px 0;
+}
+.recommend-plan {
+  padding: 16px;
+  background: #fff;
+  border: 1px solid #ded9f1;
+  border-radius: 12px;
+}
+.recommend-plan-grid,
+.recommend-course-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.recommend-plan-grid > section,
+.recommend-plan-grid > fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  background: #f7f8fb;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.recommend-plan-grid legend {
+  padding: 0 4px;
+  font-weight: 600;
+}
+.recommend-courses,
+.recommend-course-list,
+.recommend-extensions,
+.recommend-meetings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.recommend-courses > li + li {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.recommend-courses label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.recommend-courses input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 4px 0;
+  accent-color: var(--accent);
+}
+.recommend-meetings {
+  margin: 4px 0;
+  font-size: 0.83rem;
+  color: var(--muted);
+}
+.recommend-course-card,
+.recommend-extensions > li {
+  min-width: 0;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.recommendation .course-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 0.93rem;
+}
+.recommend-course-card p,
+.recommend-extensions p {
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+.recommend-card-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  font-size: 0.82rem;
+}
+.recommend-extensions {
+  display: grid;
+  gap: 8px;
+}
+.recommend-extensions button {
+  display: block;
+}
+.recommend-confirm {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+.recommend-confirm > .primary {
+  margin-left: auto;
+}
+.recommend-confirm .plan-error {
+  flex-basis: 100%;
+}
+.plan-error,
+.plan-conflict small {
+  color: #a32842;
+}
+.recommendation > button {
+  justify-self: start;
 }
 .rules {
   padding: 30px;

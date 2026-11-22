@@ -9,5 +9,8 @@ __pycache__/
 .pytest_cache/
 .runtime/
 *.log
+*.dump
+*.dump.gz
+*.backup
 test-results/
 *.tsbuildinfo

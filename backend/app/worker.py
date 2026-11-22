@@ -6,8 +6,10 @@ import signal
 import smtplib
 import ssl
 import threading
+from contextlib import closing
 from datetime import timedelta
 from email.message import EmailMessage
+from urllib.parse import urlencode
 from uuid import uuid4
 from sqlalchemy import select, update, or_, and_
 from .db import SessionLocal
@@ -50,27 +52,60 @@ def claim_one():
         row.status, row.attempt_count = 'PROCESSING', row.attempt_count + 1
         row.claim_token, row.lease_until = str(uuid4()), at + timedelta(seconds=60)
         user = db.get(User, row.recipient_user_id)
-        return {'id': row.id, 'claim_token': row.claim_token, 'attempt_count': row.attempt_count,
+        return {'id': row.id, 'claim_token': row.claim_token, 'attempt_count': row.attempt_count, 'term_id': row.term_id,
                 'email': user.email, 'type': row.type, 'payload': row.payload}
+
+
+def timetable_email_lines(payload):
+    lines = ['上課時間以臺北時間顯示。']
+    groups = (
+        (f'正式選課（{payload["total_credits"]} 學分，上限 {payload["credit_limit"]} 學分）', payload['items']),
+        ('初選待分發', payload['pending_items']),
+    )
+    for heading, sections in groups:
+        lines.extend(('', heading))
+        if not sections:
+            lines.append('目前沒有課程。')
+        for section in sections:
+            lines.append(f'• {section["code"]} {section["title"]}（{section["section_no"]} 班，{section["credits"]} 學分）')
+            if not section['meetings']:
+                lines.append('  上課時間尚未安排。')
+            for meeting in section['meetings']:
+                day = '一二三四五六日'[meeting['weekday'] - 1]
+                start, end = meeting['start_time'][:5], meeting['end_time'][:5]
+                lines.append(f'  週{day} {start}–{end} {meeting["room"]}')
+    return lines
 
 
 def send_smtp(job):
     p = job['payload']
-    labels = {'ENROLLED': '加選成功', 'DROPPED': '退選成功', 'ALLOCATION': '初選分發結果'}
-    label = labels.get(job['type'], '選課通知')
+    notice_type = job['type']
+    labels = {'ENROLLED': '加選成功', 'DROPPED': '退選成功', 'ALLOCATION': '初選分發結果',
+              'INITIAL_RECEIPT': '初選登記確認', 'TIMETABLE': '每週課表'}
+    label = labels.get(notice_type, '選課通知')
     msg = EmailMessage()
     msg['From'], msg['To'] = settings.smtp_from, job['email']
     msg['Subject'] = f'{p.get("term_code", "")} {label}'
     msg['Message-ID'] = f'<outbox-{job["id"]}@course-registration.example.test>'
     content = [f'{p.get("term_code", "")} {label}']
-    if job['type'] == 'ALLOCATION':
+    if notice_type == 'ALLOCATION':
         for result in p.get('results', []):
             content.append(f'{result["code"]} {result["title"]}：{result["status"]} {result.get("reason") or ""}')
+    elif notice_type == 'INITIAL_RECEIPT':
+        content.append('以下班別已登記，等待初選分發。正式錄取以分發公布為準。')
+        for section in p['sections']:
+            content.append(f'{section["code"]} {section["title"]}（{section["section_no"]} 班）')
+    elif notice_type == 'TIMETABLE':
+        content.extend(timetable_email_lines(p))
     else:
         content.append(f'{p.get("code", "")} {p.get("title", "")}：{label}')
-    content.append('查看結果：' + settings.app_origin.rstrip('/') + p.get('url', '/applications'))
+    path = p.get('url', '/applications')
+    if job.get('term_id') and path in ('/applications', '/timetable'):
+        path += '?' + urlencode({'term': job['term_id']})
+    link = settings.app_origin.rstrip('/') + path
+    content.append(f'\n查看我的課表 {link}' if notice_type == 'TIMETABLE' else '查看結果：' + link)
     msg.set_content('\n'.join(content))
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+    with closing(smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10)) as smtp:
         smtp.ehlo_or_helo_if_needed()
         if settings.smtp_starttls:
             if not smtp.has_extn('starttls'):
@@ -82,6 +117,14 @@ def send_smtp(job):
                 raise SMTPConfigurationError('SMTP_AUTH_UNSUPPORTED')
             smtp.login(settings.smtp_user, settings.smtp_password)
         smtp.send_message(msg)
+        # A successful DATA reply means the server has accepted this message.
+        # Failure to end the session must not cause the outbox to resend it.
+        try:
+            status, _ = smtp.quit()
+            if status != 221:
+                log.warning('SMTP_QUIT_REJECTED event_id=%s status=%s', job['id'], status)
+        except OSError as error:
+            log.warning('SMTP_QUIT_FAILED event_id=%s error_class=%s', job['id'], type(error).__name__)
 
 
 def finish(job, error=None):

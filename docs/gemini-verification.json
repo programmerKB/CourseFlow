@@ -1,6 +1,7 @@
 {
   "status": "not_run",
-  "reason": "GEMINI_API_KEY was not supplied in this session.",
+  "reason": "A live Gemini credential was not available to the local test runner.",
   "stub_graph_tests": "passed",
+  "required_scenarios": ["public_course_query", "research_recommendation"],
   "real_verification_command": "docker compose exec api python -m app.verify_gemini"
 }

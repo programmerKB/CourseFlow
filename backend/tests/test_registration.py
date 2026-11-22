@@ -55,7 +55,8 @@ def test_at02_catalog_filters_multimeeting_and_counts(client):
 
 def test_at03_initial_boundaries_replay_cancel(client, monkeypatch):
     signin(client)
-    path = f'/api/v1/me/terms/{INITIAL}/applications/'
+    base = f'/api/v1/me/terms/{INITIAL}'
+    path = base + '/applications/'
     a, b = sec('CS101', slug='initial'), sec('CS101', 'B', 'initial')
     with SessionLocal() as db:
         start = db.get(RegistrationPeriod, (INITIAL, 'INITIAL')).starts_at
@@ -66,10 +67,57 @@ def test_at03_initial_boundaries_replay_cancel(client, monkeypatch):
     assert first.json()['status'] == 'PENDING'
     assert client.put(path + a).json()['application_id'] == first.json()['application_id']
     assert client.put(path + b).json()['code'] == 'APPLICATION_EXISTS'
+    timetable = client.get(base + '/timetable').json()
+    assert [section['id'] for section in timetable['pending_items']] == [a]
+    assert timetable['items'] == [] and float(timetable['total_credits']) == 0
     assert client.delete(path + a).status_code == 204
+    assert client.get(base + '/applications').json()['items'] == []
+    assert client.get(base + '/timetable').json()['pending_items'] == []
+    with SessionLocal() as db:
+        assert db.get(Application, first.json()['application_id']).status == 'CANCELLED'
     assert client.put(path + b).status_code == 200
     monkeypatch.setattr(reg, 'now', lambda db: end)
     assert client.put(path + a).json()['code'] == 'REGISTRATION_CLOSED'
+    assert count(NotificationOutbox) == 0
+
+
+def test_email_timetable_saves_snapshot_for_signed_in_student(client):
+    base = f'/api/v1/me/terms/{INITIAL}'
+    email_path = base + '/timetable/email'
+    headers = {'Idempotency-Key': 'send-current-timetable'}
+    assert client.post(email_path, headers=headers).status_code == 401
+    signin(client, 'admin')
+    assert client.post(email_path, headers=headers).status_code == 403
+    signin(client)
+    pending = sec('CS101', slug='initial')
+    with SessionLocal.begin() as db:
+        reg.enroll(db, uid('student/student01'), INITIAL,
+                   reg.get_section(db, INITIAL, sec('EE101', slug='initial')), 'INITIAL')
+    assert client.put(f'{base}/applications/{pending}').status_code == 200
+    assert client.post(email_path).status_code == 422
+    assert count(NotificationOutbox) == 0
+
+    first = client.post(email_path, headers=headers)
+    assert first.status_code == 201, first.text
+    assert client.delete(f'{base}/applications/{pending}').status_code == 204
+    replay = client.post(email_path, headers=headers)
+    assert replay.status_code == 201 and replay.json() == first.json()
+    assert count(NotificationOutbox) == 1
+
+    second = client.post(email_path, headers={'Idempotency-Key': 'send-updated-timetable'})
+    assert second.status_code == 201 and second.json() != first.json()
+    with SessionLocal() as db:
+        notice = db.get(NotificationOutbox, first.json()['notification_id'])
+        assert notice.type == 'TIMETABLE' and notice.recipient_user_id == uid('user/student01')
+        assert notice.payload['url'] == f'/timetable?term={INITIAL}'
+        assert notice.payload['total_credits'] == 3
+        assert [section['code'] for section in notice.payload['items']] == ['EE101']
+        [section] = notice.payload['pending_items']
+        assert section['code'] == 'CS101' and section['section_no'] == 'A'
+        assert [(m['weekday'], m['start_time'], m['room']) for m in section['meetings']] == [
+            (1, '09:00:00', 'TR-211'), (3, '09:00:00', 'TR-211'),
+        ]
+        assert db.get(NotificationOutbox, second.json()['notification_id']).payload['pending_items'] == []
 
 
 def prepare_allocation():
@@ -192,6 +240,7 @@ def test_personal_isolation_and_drop_replay(client):
     assert client.delete(path, headers={'Idempotency-Key':'drop-key'}).status_code == 204
     assert count(NotificationOutbox) == before
     assert add(client, sec('CS101')).status_code == 201
+    assert count(NotificationOutbox) == 0
 
 
 def test_seed_preserves_existing_records(client):
@@ -224,6 +273,8 @@ def test_draft_admin_lifecycle(client):
     r = client.post(f'/api/v1/admin/terms/{tid}/sections',json=data)
     assert r.status_code == 201, r.text
     sid = r.json()['id']
+    assert client.get(f'/api/v1/admin/terms/{tid}/sections/{sid}').json()['id'] == sid
+    assert client.get(f'/api/v1/terms/{tid}/sections/{sid}').status_code == 404
     assert client.post(f'/api/v1/admin/terms/{tid}/publish').status_code == 200
     assert client.get(f'/api/v1/terms/{tid}/sections/{sid}').status_code == 200
     assert client.patch(f'/api/v1/admin/terms/{tid}/sections/{sid}',json={'credits':'3.0'}).json()['code'] == 'CATALOG_FROZEN'

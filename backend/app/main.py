@@ -1,15 +1,16 @@
 import hashlib
 import logging
 import time
+from datetime import datetime
+from typing import Annotated, Literal
 from uuid import uuid4
-from typing import Annotated
 
 from fastapi import FastAPI, Request, Depends, Response, Query, Header
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
-from pydantic import Field
+from pydantic import Field, model_validator
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from .config import settings
@@ -22,7 +23,7 @@ from .admin import UUIDStr, StrictModel
 
 log = logging.getLogger('courses')
 logging.basicConfig(level=logging.INFO, format='%(message)s')
-app = FastAPI(title='大學選課系統', version='1.0.0')
+app = FastAPI(title='大學選課與課程推薦系統', version='2.0.0')
 prefix = '/api/v1'
 
 
@@ -32,7 +33,7 @@ async def request_context(request, call_next):
     begin = time.monotonic()
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
         origin = request.headers.get('origin')
-        if (origin and origin.rstrip('/') != settings.app_origin.rstrip('/')) or request.headers.get('sec-fetch-site') == 'cross-site':
+        if (origin is not None and origin not in settings.browser_origins) or request.headers.get('sec-fetch-site') == 'cross-site':
             return JSONResponse(status_code=403, content={'code': 'ORIGIN_FORBIDDEN', 'message': '請由同源網站送出請求。', 'request_id': request.state.request_id})
     response = await call_next(request)
     response.headers['X-Request-ID'] = request.state.request_id
@@ -121,7 +122,7 @@ def auth_logout(request: Request, response: Response, user=Depends(current_user)
 
 @app.get(prefix + '/terms')
 def terms(db=Depends(get_db)):
-    return [admin.term_dict(t) for t in db.scalars(select(Term).where(Term.catalog_published_at.is_not(None)).order_by(Term.start_date.desc(), Term.code))]
+    return [admin.term_dict(t) for t in db.scalars(reg.public_terms_query().order_by(Term.start_date.desc(), Term.code))]
 
 
 @app.get(prefix + '/departments')
@@ -172,6 +173,37 @@ class EnrollmentInput(StrictModel):
 RequestKey = Annotated[str, Header(alias='Idempotency-Key', min_length=1, max_length=200)]
 
 
+class PlanConfirmInput(StrictModel):
+    section_ids: list[UUIDStr] = Field(min_length=1, max_length=5)
+
+    @model_validator(mode='after')
+    def distinct_sections(self):
+        if len(set(self.section_ids)) != len(self.section_ids):
+            raise ValueError('確認的班別不得重複。')
+        return self
+
+
+class PlanConfirmationItem(StrictModel):
+    section_id: UUIDStr
+    status: Literal['PENDING', 'ENROLLED']
+
+
+class PlanConfirmation(StrictModel):
+    plan_id: UUIDStr
+    phase: Literal['INITIAL', 'ADD_DROP']
+    items: list[PlanConfirmationItem]
+    submitted_at: datetime
+
+
+@app.post(prefix + '/me/terms/{term_id}/selection-plans/{plan_id}/confirm', response_model=PlanConfirmation)
+def plan_confirm(term_id: UUIDStr, plan_id: UUIDStr, body: PlanConfirmInput, request_key: RequestKey,
+                 user=Depends(student_user), db=Depends(get_db)):
+    with db.begin():
+        status, data = reg.confirm_selection_plan(db, user['student_id'], term_id, plan_id,
+                                                  body.section_ids, user['id'], request_key)
+    return JSONResponse(status_code=status, content=data)
+
+
 @app.post(prefix + '/me/terms/{term_id}/enrollments')
 def enrollment_add(term_id: UUIDStr, body: EnrollmentInput, request: Request, request_key: RequestKey,
                    user=Depends(student_user), db=Depends(get_db)):
@@ -191,6 +223,13 @@ def enrollment_drop(term_id: UUIDStr, section_id: UUIDStr, request: Request, req
 @app.get(prefix + '/me/terms/{term_id}/timetable')
 def timetable(term_id: UUIDStr, user=Depends(student_user), db=Depends(get_db)):
     return reg.get_timetable(db, user['student_id'], term_id)
+
+
+@app.post(prefix + '/me/terms/{term_id}/timetable/email', status_code=201)
+def email_timetable(term_id: UUIDStr, request_key: RequestKey, user=Depends(student_user), db=Depends(get_db)):
+    with db.begin():
+        status, data = reg.queue_timetable_email(db, user['student_id'], term_id, user['id'], request_key)
+    return JSONResponse(status_code=status, content=data)
 
 
 @app.get(prefix + '/me/terms/{term_id}/sections/{section_id}/eligibility')
@@ -228,15 +267,24 @@ def period_update(term_id: UUIDStr, body: admin.PeriodsInput, user=Depends(admin
 
 
 @app.get(prefix + '/admin/terms/{term_id}/sections')
-def admin_sections(term_id: UUIDStr, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=50), user=Depends(admin_user), db=Depends(get_db)):
+def admin_sections(term_id: UUIDStr, q: str | None = Query(None, max_length=100), department_id: UUIDStr | None = None,
+                   instructor: str | None = Query(None, max_length=100), weekday: int | None = Query(None, ge=1, le=7),
+                   page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=50),
+                   user=Depends(admin_user), db=Depends(get_db)):
     reg.get_term(db, term_id, public=False)
-    return reg.list_sections(db, term_id, page=page, page_size=page_size)
+    return reg.list_sections(db, term_id, q, department_id, instructor, weekday, page, page_size)
 
 
 @app.post(prefix + '/admin/terms/{term_id}/sections', status_code=201)
 def section_create(term_id: UUIDStr, body: admin.SectionInput, user=Depends(admin_user), db=Depends(get_db)):
     with db.begin():
         return admin.save_section(db, term_id, body, user['id'])
+
+
+@app.get(prefix + '/admin/terms/{term_id}/sections/{section_id}')
+def admin_section_detail(term_id: UUIDStr, section_id: UUIDStr, user=Depends(admin_user), db=Depends(get_db)):
+    reg.get_term(db, term_id, public=False)
+    return reg.section_dict(db, reg.get_section(db, term_id, section_id))
 
 
 @app.patch(prefix + '/admin/terms/{term_id}/sections/{section_id}')

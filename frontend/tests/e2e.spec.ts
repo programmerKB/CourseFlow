@@ -9,6 +9,8 @@ async function login(page: Page, name = "student01") {
 }
 test("訪客查課、學生加退選、課表、初選登記與助理", async ({ page }) => {
   const errors: string[] = [];
+  // Browsers accessing the VM over plain HTTP have no randomUUID().
+  await page.addInitScript(() => Object.defineProperty(crypto, "randomUUID", { value: undefined }));
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/courses");
   await expect(
@@ -82,6 +84,18 @@ test("訪客查課、學生加退選、課表、初選登記與助理", async ({
     .click();
   await expect(page.getByRole("alert")).toContainText("目前待分發");
   await page.getByRole("button", { name: "關閉訊息" }).click();
+  await page.getByRole("button", { name: "我的課表", exact: true }).click();
+  const pendingClasses = page.locator(".class-block.pending");
+  await expect(pendingClasses).toHaveCount(2);
+  await expect(pendingClasses.first()).toContainText("待分發");
+  await expect(pendingClasses.first()).toContainText("程式設計");
+  await expect(page.locator(".credit-summary strong")).toContainText("0 /");
+  const mailRequest = page.waitForResponse(
+    (response) => response.url().endsWith("/timetable/email") && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "寄送課表", exact: true }).click();
+  expect((await mailRequest).status()).toBe(201);
+  await expect(page.getByRole("alert")).toContainText("課表已排入寄送");
   await page.getByRole("button", { name: "我的選課", exact: true }).click();
   await expect(page.locator("tbody")).toContainText("待分發");
   await page.getByRole("button", { name: "取消登記", exact: true }).click();
@@ -89,7 +103,9 @@ test("訪客查課、學生加退選、課表、初選登記與助理", async ({
     .getByRole("dialog")
     .getByRole("button", { name: "確認提交" })
     .click();
-  await expect(page.locator("tbody")).toContainText("已取消登記");
+  await expect(page.getByText("尚無初選登記或分發結果")).toBeVisible();
+  await page.getByRole("button", { name: "我的課表", exact: true }).click();
+  await expect(pendingClasses).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 test("管理員可瀏覽分發與通知並調整容量", async ({ page }) => {

@@ -8,7 +8,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from datetime import time as localtime
+from datetime import datetime, time as localtime
+from zoneinfo import ZoneInfo
 from sqlalchemy import select, func, text
 import httpx
 from app.db import SessionLocal
@@ -49,7 +50,7 @@ try:
             durations=sorted(pool.map(request,range(200)))
 finally:
     process.terminate();process.wait(timeout=10)
-report={'date':'2026-11-21','postgresql':None,'platform':platform.platform(),'cpu_count':os.cpu_count(),
+report={'date':datetime.now(ZoneInfo('Asia/Taipei')).date().isoformat(),'postgresql':None,'platform':platform.platform(),'cpu_count':os.cpu_count(),
         'memory_kib':int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemTotal:'))),
         'sections_in_term':1000,'concurrency':20,'warmup_requests':25,'measured_requests':200,
         'p50_ms':round(statistics.median(durations),2),'p95_ms':round(durations[189],2),'max_ms':round(durations[-1],2),'target_p95_ms':500}

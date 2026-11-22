@@ -5,7 +5,7 @@ deploy:
 up:
 	docker compose up --build -d
 seed:
-	docker compose exec api python -m app.seed --scenario add-drop
+	docker compose exec api python -m app.seed --scenario initial
 test:
 	docker compose run --rm migrate python run_tests.py
 

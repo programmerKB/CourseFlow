@@ -1,9 +1,9 @@
 {
-  "timestamp": "2026-11-21T14:11:58.974565+00:00",
-  "enrollment_status": 201,
+  "timestamp": "2026-11-22T16:18:13.418166+00:00",
+  "timetable_email_status": 201,
   "smtp_failure": "ConnectionRefusedError",
   "retry_attempt": 2,
   "final_status": "SENT",
-  "mailpit_message_count": 5,
-  "message_id": "<outbox-6cbbcc0d-83aa-4ae9-bc01-e6106400bf99@course-registration.example.test>"
+  "mailpit_message_count": 2,
+  "message_id": "<outbox-d2e97f8d-e4e3-4614-ba6c-361e0b4387e2@course-registration.example.test>"
 }

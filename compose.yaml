@@ -2,10 +2,14 @@ name: course-registration
 x-backend: &backend
   build: ./backend
   environment: &backend-env
-    DATABASE_URL: postgresql+psycopg://course_app:${APP_DB_PASSWORD:-course_app}@db:5432/courses
-    PUBLIC_DATABASE_URL: postgresql+psycopg://course_public:${PUBLIC_DB_PASSWORD:-course_public}@db:5432/courses
+    DATABASE_URL: postgresql+psycopg://course_app@db:5432/courses
+    DATABASE_PASSWORD: ${APP_DB_PASSWORD:-course_app}
+    PUBLIC_DATABASE_URL: postgresql+psycopg://course_public@db:5432/courses
+    PUBLIC_DATABASE_PASSWORD: ${PUBLIC_DB_PASSWORD:-course_public}
     APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8080}
+    APP_ALLOWED_ORIGINS: ${APP_ALLOWED_ORIGINS:-}
     COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    PUBLIC_INITIAL_TERM_ID: ${PUBLIC_INITIAL_TERM_ID-8abc15dd-c1b8-53ed-a570-ae723e17a762}
     GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
     GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     CHAT_STUB: ${CHAT_STUB:-false}
@@ -31,15 +35,17 @@ services:
       - course_db:/var/lib/postgresql/data
       - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/10-users.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U course_migrator -d courses"]
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "course_migrator", "-d", "courses"]
       interval: 3s
       timeout: 3s
       retries: 20
   migrate:
     <<: *backend
     environment:
-      DATABASE_URL: postgresql+psycopg://course_migrator:${MIGRATOR_DB_PASSWORD:-course_migrator}@db:5432/courses
-      PUBLIC_DATABASE_URL: postgresql+psycopg://course_public:${PUBLIC_DB_PASSWORD:-course_public}@db:5432/courses
+      DATABASE_URL: postgresql+psycopg://course_migrator@db:5432/courses
+      DATABASE_PASSWORD: ${MIGRATOR_DB_PASSWORD:-course_migrator}
+      PUBLIC_DATABASE_URL: postgresql+psycopg://course_public@db:5432/courses
+      PUBLIC_DATABASE_PASSWORD: ${PUBLIC_DB_PASSWORD:-course_public}
     command: ["alembic", "upgrade", "head"]
     depends_on:
       db:

@@ -1,13 +1,28 @@
 from functools import lru_cache
+from uuid import UUID
+from pydantic import AnyHttpUrl, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+
+
+def normalize_origin(value: str) -> str:
+    url = AnyHttpUrl(value.strip())
+    if (url.path not in ('', '/') or url.username is not None or url.password is not None
+            or url.query is not None or url.fragment is not None or '*' in (url.host or '')):
+        raise ValueError('Use an exact HTTP or HTTPS origin without paths, parameters, or wildcards.')
+    return str(url).rstrip('/')
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', extra='ignore')
     database_url: str = 'postgresql+psycopg://course_app:course_app@localhost:5432/courses'
     public_database_url: str = 'postgresql+psycopg://course_public:course_public@localhost:5432/courses'
+    database_password: SecretStr | None = None
+    public_database_password: SecretStr | None = None
     app_origin: str = 'http://localhost:8080'
+    app_allowed_origins: str = ''
     cookie_secure: bool = False
+    public_initial_term_id: str = ''
     session_hours: int = 24
     gemini_model: str = 'gemini-3.5-flash-lite'
     gemini_api_key: str = ''
@@ -18,6 +33,36 @@ class Settings(BaseSettings):
     smtp_password: str = ''
     smtp_from: str = '選課通知 <courses@example.test>'
     smtp_starttls: bool = False
+
+    @field_validator('app_origin')
+    @classmethod
+    def validate_app_origin(cls, value: str) -> str:
+        return normalize_origin(value)
+
+    @field_validator('app_allowed_origins')
+    @classmethod
+    def validate_app_allowed_origins(cls, value: str) -> str:
+        return ','.join(normalize_origin(origin) for origin in value.split(',') if origin.strip())
+
+    @property
+    def browser_origins(self) -> frozenset[str]:
+        return frozenset((self.app_origin, *filter(None, self.app_allowed_origins.split(','))))
+
+    @field_validator('public_initial_term_id')
+    @classmethod
+    def validate_public_initial_term_id(cls, value: str) -> str:
+        value = value.strip()
+        return str(UUID(value)) if value else ''
+
+    @model_validator(mode='after')
+    def apply_database_passwords(self):
+        if self.database_password is not None:
+            self.database_url = make_url(self.database_url).set(
+                password=self.database_password.get_secret_value()).render_as_string(hide_password=False)
+        if self.public_database_password is not None:
+            self.public_database_url = make_url(self.public_database_url).set(
+                password=self.public_database_password.get_secret_value()).render_as_string(hide_password=False)
+        return self
 
 
 @lru_cache

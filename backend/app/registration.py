@@ -1,25 +1,31 @@
 """Registration rules and mutations. Call mutations inside one caller-owned transaction.
 
 Lock order: term (share for students / update for administrators), student_term,
-section. No network I/O is performed inside any of these transactions.
+selection plan (batch only), sections by ID. These transactions perform database operations exclusively.
 """
 import hashlib
 import json
 from datetime import timezone
+from dataclasses import dataclass
 from decimal import Decimal
+from urllib.parse import urlencode
+from uuid import uuid4
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select, func, and_, or_, exists
 
+from .config import settings
 from .errors import DomainError
 from .models import (Term, RegistrationPeriod, StudentTerm, Section, Course,
                      Instructor, Department, SectionMeeting, SectionPrerequisite,
                      CourseCompletion, Enrollment, Application, AllocationRun,
-                     AuditEvent, IdempotencyKey, NotificationOutbox, Student)
+                     AuditEvent, IdempotencyKey, NotificationOutbox, Student,
+                     SelectionPlan, SelectionPlanItem)
 
 REASONS = {
     'SECTION_UNAVAILABLE': '此班別目前未開放選課。',
     'ALREADY_ENROLLED': '已選上同一課程，不能跨班重複修課。',
+    'APPLICATION_EXISTS': '已登記同課程的班別，請先取消原登記。',
     'PREREQUISITE_MISSING': '尚未在先前學期通過全部先修科目。',
     'TIME_CONFLICT': '此班別與目前正式課表的上課時間重疊。',
     'CREDIT_LIMIT_EXCEEDED': '加選後總學分超過本學期學分上限。',
@@ -32,24 +38,36 @@ def now(db):
     return db.scalar(select(func.clock_timestamp()))
 
 
+def public_terms_query():
+    stmt = select(Term).where(Term.catalog_published_at.is_not(None))
+    if settings.public_initial_term_id:
+        stmt = stmt.where(Term.id == settings.public_initial_term_id)
+    return stmt
+
+
 def get_term(db, term_id, lock=None, public=True):
-    stmt = select(Term).where(Term.id == term_id)
+    stmt = (public_terms_query() if public else select(Term)).where(Term.id == term_id)
     if lock:
         stmt = stmt.with_for_update(read=(lock == 'share'))
     term = db.scalar(stmt.execution_options(populate_existing=True))
-    if not term or (public and not term.catalog_published_at):
+    if term is None:
         raise DomainError(404, 'TERM_NOT_FOUND', '找不到公開學期。')
     return term
 
 
 def phase(db, term, at=None):
-    at = at or now(db)
-    periods = {p.kind: p for p in db.scalars(select(RegistrationPeriod).where(RegistrationPeriod.term_id == term.id))}
-    initial, add_drop = periods.get('INITIAL'), periods.get('ADD_DROP')
-    if not term.catalog_published_at or not initial or not add_drop:
-        return 'UPCOMING'
+    periods = list(db.scalars(select(RegistrationPeriod).where(RegistrationPeriod.term_id == term.id)))
     published = db.scalar(select(AllocationRun.id).where(AllocationRun.term_id == term.id)) is not None
-    if at >= add_drop.ends_at:
+    return phase_from_rows(term, at or now(db), periods, published)
+
+
+def phase_from_rows(term, at, periods, published):
+    by_kind = {period.kind: period for period in periods}
+    initial, add_drop = by_kind.get('INITIAL'), by_kind.get('ADD_DROP')
+    initial_only = term.id == settings.public_initial_term_id
+    if not term.catalog_published_at or not initial or (not initial_only and not add_drop):
+        return 'UPCOMING'
+    if not initial_only and at >= add_drop.ends_at:
         return 'CLOSED'
     if at < initial.starts_at:
         return 'UPCOMING'
@@ -57,17 +75,20 @@ def phase(db, term, at=None):
         return 'INITIAL'
     if not published:
         return 'AWAITING_ALLOCATION'
-    if at < add_drop.starts_at:
+    if initial_only or at < add_drop.starts_at:
         return 'RESULTS'
     return 'ADD_DROP'
 
 
 def registration_status(db, term):
-    at = now(db)
+    periods = list(db.scalars(select(RegistrationPeriod).where(RegistrationPeriod.term_id == term.id).order_by(RegistrationPeriod.starts_at)))
+    if term.id == settings.public_initial_term_id:
+        periods = [period for period in periods if period.kind == 'INITIAL']
     run = db.scalar(select(AllocationRun).where(AllocationRun.term_id == term.id))
-    return {'term_id': term.id, 'phase': phase(db, term, at), 'as_of': at,
+    at = now(db)
+    return {'term_id': term.id, 'phase': phase_from_rows(term, at, periods, run is not None), 'as_of': at,
             'periods': [{'kind': p.kind, 'starts_at': p.starts_at, 'ends_at': p.ends_at}
-                        for p in db.scalars(select(RegistrationPeriod).where(RegistrationPeriod.term_id == term.id).order_by(RegistrationPeriod.starts_at))],
+                        for p in periods],
             'published_at': run.published_at if run else None,
             'allocation': run_dict(run) if run else None}
 
@@ -145,38 +166,88 @@ def active_enrollments(db, student_id, term_id):
 
 def get_timetable(db, student_id, term_id):
     get_term(db, term_id)
-    st = student_term(db, student_id, term_id)
-    active = active_enrollments(db, student_id, term_id)
-    items = section_rows(db, [e.section_id for e in active])
-    return {'items': items, 'total_credits': sum((s['credits'] for s in items), Decimal('0.0')),
+    return timetable_snapshot(db, student_term(db, student_id, term_id))
+
+
+def timetable_snapshot(db, st):
+    # Read both statuses together so publishing cannot move a section between reads.
+    enrolled = select(Enrollment.section_id, Enrollment.status).where(
+        Enrollment.student_id == st.student_id, Enrollment.term_id == st.term_id, Enrollment.status == 'ENROLLED')
+    pending = select(Application.section_id, Application.status).where(
+        Application.student_id == st.student_id, Application.term_id == st.term_id, Application.status == 'PENDING')
+    selections = db.execute(enrolled.union_all(pending)).all()
+    enrolled_ids = {section_id for section_id, status in selections if status == 'ENROLLED'}
+    sections = section_rows(db, list({section_id for section_id, _ in selections}))
+    sections.sort(key=lambda section: (section['code'], section['section_no']))
+    items = [section for section in sections if section['id'] in enrolled_ids]
+    pending_items = [section for section in sections if section['id'] not in enrolled_ids]
+    return {'items': items, 'pending_items': pending_items,
+            'total_credits': sum((s['credits'] for s in items), Decimal('0.0')),
             'credit_limit': st.credit_limit, 'as_of': now(db)}
 
 
-def admission_error(db, st, term, section):
-    """Return first rule failure in the exact SRS order. No writes."""
-    if section.term_id != term.id or not section.is_selectable:
+@dataclass(frozen=True)
+class AdmissionState:
+    enrolled: list[dict]
+    pending: list[dict]
+    passed_courses: set[str]
+    credit_limit: Decimal
+
+
+def load_admission_state(db, st, term, *, include_pending=True):
+    enrolled_ids = [row.section_id for row in active_enrollments(db, st.student_id, term.id)]
+    pending_ids = list(db.scalars(select(Application.section_id).where(
+        Application.student_id == st.student_id, Application.term_id == term.id,
+        Application.status == 'PENDING',
+    ))) if include_pending else []
+    rows = {row['id']: row for row in section_rows(db, list(dict.fromkeys(enrolled_ids + pending_ids)))}
+    passed_courses = set(db.scalars(select(CourseCompletion.course_id)
+        .join(Term, Term.id == CourseCompletion.completed_term_id)
+        .where(CourseCompletion.student_id == st.student_id, Term.end_date < term.start_date)))
+    return AdmissionState([rows[sid] for sid in enrolled_ids], [rows[sid] for sid in pending_ids], passed_courses, st.credit_limit)
+
+
+def baseline_credits(baseline, phase):
+    rows = baseline.enrolled + (baseline.pending if phase == 'INITIAL' else [])
+    return sum({row['id']: row['credits'] for row in rows}.values(), Decimal('0.0'))
+
+
+def evaluate_admission(term_id, section, baseline, phase, planned=(), *, keep_existing_pending=False):
+    """Use the same ordered constraints for one course, a draft, and a batch."""
+    if section['term_id'] != term_id or not section['is_selectable']:
         return 'SECTION_UNAVAILABLE', None
-    active = active_enrollments(db, st.student_id, term.id)
-    if any(e.course_id == section.course_id for e in active):
+    if any(row['course_id'] == section['course_id'] for row in baseline.enrolled):
         return 'ALREADY_ENROLLED', None
-    required = set(db.scalars(select(SectionPrerequisite.required_course_id).where(SectionPrerequisite.section_id == section.id)))
-    passed = set(db.scalars(select(CourseCompletion.course_id).join(Term, Term.id == CourseCompletion.completed_term_id)
-                            .where(CourseCompletion.student_id == st.student_id, Term.end_date < term.start_date)))
-    if required - passed:
-        return 'PREREQUISITE_MISSING', {'missing_course_ids': sorted(required - passed)}
-    target = list(db.scalars(select(SectionMeeting).where(SectionMeeting.section_id == section.id)))
-    existing = list(db.scalars(select(SectionMeeting).where(SectionMeeting.section_id.in_([e.section_id for e in active])))) if active else []
-    conflicts = sorted({m.section_id for t in target for m in existing if t.weekday == m.weekday and t.start_time < m.end_time and m.start_time < t.end_time})
+    pending = [row for row in baseline.pending if not keep_existing_pending or row['id'] != section['id']] if phase == 'INITIAL' else []
+    if any(row['course_id'] == section['course_id'] for row in pending):
+        return 'APPLICATION_EXISTS', None
+    if any(row['course_id'] == section['course_id'] for row in planned):
+        return ('APPLICATION_EXISTS' if phase == 'INITIAL' else 'ALREADY_ENROLLED'), None
+    missing = {row['id'] for row in section['prerequisites']} - baseline.passed_courses
+    if missing:
+        return 'PREREQUISITE_MISSING', {'missing_course_ids': sorted(missing)}
+    existing = {row['id']: row for row in [*baseline.enrolled, *pending, *planned]}
+    conflicts = sorted({
+        row['id'] for row in existing.values() for meeting in row['meetings'] for target in section['meetings']
+        if target['weekday'] == meeting['weekday'] and target['start_time'] < meeting['end_time']
+        and meeting['start_time'] < target['end_time']
+    })
     if conflicts:
         return 'TIME_CONFLICT', {'conflicting_section_ids': conflicts}
-    credits = db.scalar(select(func.coalesce(func.sum(Section.credits), 0)).join(Enrollment, Enrollment.section_id == Section.id)
-                        .where(Enrollment.student_id == st.student_id, Enrollment.term_id == term.id, Enrollment.status == 'ENROLLED'))
-    if credits + section.credits > st.credit_limit:
-        return 'CREDIT_LIMIT_EXCEEDED', {'total_credits': str(credits + section.credits), 'credit_limit': str(st.credit_limit)}
-    n = db.scalar(select(func.count()).select_from(Enrollment).where(Enrollment.section_id == section.id, Enrollment.status == 'ENROLLED'))
-    if n >= section.capacity:
+    credits = section['credits'] + sum((row['credits'] for row in existing.values()), Decimal('0.0'))
+    if credits > baseline.credit_limit:
+        return 'CREDIT_LIMIT_EXCEEDED', {'total_credits': str(credits), 'credit_limit': str(baseline.credit_limit)}
+    if phase != 'INITIAL' and section['remaining'] <= 0:
         return 'SECTION_FULL', None
     return None, None
+
+
+def admission_error(db, st, term, section):
+    """Check a formal enrollment under the rules used by allocation and add/drop."""
+    if section.term_id != term.id or not section.is_selectable:
+        return 'SECTION_UNAVAILABLE', None
+    baseline = load_admission_state(db, st, term, include_pending=False)
+    return evaluate_admission(term.id, section_dict(db, section), baseline, 'ADD_DROP')
 
 
 def eligibility(db, student_id, term_id, section_id):
@@ -207,7 +278,9 @@ def application_dict(db, a):
 def applications(db, student_id, term_id):
     get_term(db, term_id)
     student_term(db, student_id, term_id)
-    rows = list(db.scalars(select(Application).where(Application.student_id == student_id, Application.term_id == term_id).order_by(Application.submitted_at)))
+    rows = list(db.scalars(select(Application).where(
+        Application.student_id == student_id, Application.term_id == term_id, Application.status != 'CANCELLED',
+    ).order_by(Application.submitted_at)))
     sections = {s['id']: s for s in section_rows(db, [a.section_id for a in rows])}
     return {'items': [{**sections[a.section_id], 'application_id': a.id, 'status': a.status,
                        'reason_code': a.reason_code, 'reason': REASONS.get(a.reason_code),
@@ -222,21 +295,32 @@ def apply(db, student_id, term_id, section_id, actor_user_id):
         raise DomainError(409, 'REGISTRATION_CLOSED', REASONS['REGISTRATION_CLOSED'])
     if not section.is_selectable:
         raise DomainError(409, 'SECTION_UNAVAILABLE', REASONS['SECTION_UNAVAILABLE'])
+    application = save_application(db, student_id, section, actor_user_id, now(db))
+    return application_dict(db, application)
+
+
+def save_application(db, student_id, section, actor_user_id, at, plan_id=None):
+    term_id, section_id = section.term_id, section.id
     pending = db.scalar(select(Application).where(Application.student_id == student_id, Application.term_id == term_id,
                                                    Application.course_id == section.course_id, Application.status == 'PENDING'))
     if pending:
         if pending.section_id == section_id:
-            return application_dict(db, pending)
+            if plan_id:
+                audit(db, actor_user_id, term_id, 'APPLICATION_CONFIRMED', 'application', pending.id,
+                      {'section_id': section_id, 'plan_id': plan_id})
+            return pending
         raise DomainError(409, 'APPLICATION_EXISTS', '已登記同課程的其他班別，請先取消。')
     a = db.scalar(select(Application).where(Application.student_id == student_id, Application.term_id == term_id, Application.section_id == section_id))
     if a:
-        a.status, a.submitted_at, a.decided_at, a.reason_code, a.allocation_run_id = 'PENDING', now(db), None, None, None
+        a.status, a.submitted_at, a.decided_at, a.reason_code, a.allocation_run_id = 'PENDING', at, None, None, None
     else:
-        a = Application(student_id=student_id, term_id=term_id, course_id=section.course_id, section_id=section_id, status='PENDING')
+        a = Application(student_id=student_id, term_id=term_id, course_id=section.course_id, section_id=section_id,
+                        status='PENDING', submitted_at=at)
         db.add(a)
     db.flush()
-    audit(db, actor_user_id, term_id, 'APPLICATION_SUBMITTED', 'application', a.id)
-    return application_dict(db, a)
+    payload = {'section_id': section_id, 'plan_id': plan_id} if plan_id else None
+    audit(db, actor_user_id, term_id, 'APPLICATION_SUBMITTED', 'application', a.id, payload)
+    return a
 
 
 def cancel_application(db, student_id, term_id, section_id, actor_user_id):
@@ -263,15 +347,61 @@ def enroll(db, student_id, term_id, section, source):
     return e
 
 
+def request_fingerprint(method, path, body):
+    payload = {'method': method, 'path': path, 'body': body}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def replay_response(db, student_id, term_id, request_key, fingerprint):
+    old = db.get(IdempotencyKey, (student_id, term_id, request_key))
+    if not old:
+        return None
+    if old.request_fingerprint != fingerprint:
+        raise DomainError(409, 'IDEMPOTENCY_KEY_REUSED', '此重送鍵已用於另一個請求。')
+    return old.response_status, old.response_body
+
+
+def record_response(db, student_id, term_id, request_key, fingerprint, status, body):
+    db.add(IdempotencyKey(student_id=student_id, term_id=term_id, request_key=request_key,
+                          request_fingerprint=fingerprint, response_status=status, response_body=body))
+
+
+def queue_timetable_email(db, student_id, term_id, user_id, request_key):
+    term = get_term(db, term_id, 'share')
+    st = student_term(db, student_id, term_id, True)
+    fingerprint = request_fingerprint('POST', f'/api/v1/me/terms/{term_id}/timetable/email', {})
+    replay = replay_response(db, student_id, term_id, request_key, fingerprint)
+    if replay is not None:
+        return replay
+
+    timetable = timetable_snapshot(db, st)
+    fields = ('code', 'title', 'section_no', 'credits', 'meetings')
+    payload = {group: [{field: section[field] for field in fields} for section in timetable[group]]
+               for group in ('items', 'pending_items')}
+    payload.update(term_code=term.code, total_credits=timetable['total_credits'],
+                   credit_limit=timetable['credit_limit'], url='/timetable?' + urlencode({'term': term_id}))
+    notification_id = str(uuid4())
+    db.add(NotificationOutbox(id=notification_id, event_key=f'timetable:{notification_id}', term_id=term_id,
+                              recipient_user_id=user_id, type='TIMETABLE', payload=jsonable_encoder(payload)))
+    body = {'notification_id': notification_id}
+    record_response(db, student_id, term_id, request_key, fingerprint, 201, body)
+    return 201, body
+
+
+def audit_enrollment(db, actor_user_id, enrollment, action, plan_id=None):
+    payload = {'section_id': enrollment.section_id, 'source': 'ADD_DROP'}
+    if plan_id:
+        payload['plan_id'] = plan_id
+    audit(db, actor_user_id, enrollment.term_id, action, 'enrollment', enrollment.id, payload)
+
+
 def enrollment_change(db, student_id, term_id, section_id, actor_user_id, request_key, method, path):
     term = get_term(db, term_id, 'share')
     st = student_term(db, student_id, term_id, True)
-    fingerprint = hashlib.sha256(json.dumps({'method': method, 'path': path, 'body': {'section_id': section_id} if method == 'POST' else {}}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    old = db.get(IdempotencyKey, (student_id, term_id, request_key))
-    if old:
-        if old.request_fingerprint != fingerprint:
-            raise DomainError(409, 'IDEMPOTENCY_KEY_REUSED', '此重送鍵已用於另一個請求。')
-        return old.response_status, old.response_body
+    fingerprint = request_fingerprint(method, path, {'section_id': section_id} if method == 'POST' else {})
+    replay = replay_response(db, student_id, term_id, request_key, fingerprint)
+    if replay is not None:
+        return replay
     section = get_section(db, term_id, section_id, True)
     if phase(db, term) != 'ADD_DROP':
         raise DomainError(409, 'REGISTRATION_CLOSED', REASONS['REGISTRATION_CLOSED'])
@@ -290,18 +420,83 @@ def enrollment_change(db, student_id, term_id, section_id, actor_user_id, reques
         e.status, e.updated_at = 'DROPPED', now(db)
         db.flush()
         status, action = 204, 'DROPPED'
-    event = audit(db, actor_user_id, term_id, action, 'enrollment', e.id, {'section_id': section_id, 'source': 'ADD_DROP'})
     details = section_dict(db, section)
-    db.add(NotificationOutbox(event_key=f'enrollment:{event.id}', term_id=term_id, recipient_user_id=actor_user_id,
-                              type=action, payload=jsonable_encoder({'term_code': term.code, 'title': details['title'],
-                              'code': details['code'], 'action': action, 'section_id': section_id, 'url': '/timetable'})))
+    audit_enrollment(db, actor_user_id, e, action)
     body = jsonable_encoder({'enrollment': {'id': e.id, 'section_id': section_id, 'status': e.status, 'source': e.source},
                               'remaining': details['remaining'], 'total_credits': get_timetable(db, student_id, term_id)['total_credits'],
                               'as_of': now(db)}) if status == 201 else None
-    db.add(IdempotencyKey(student_id=student_id, term_id=term_id, request_key=request_key,
-                          request_fingerprint=fingerprint, response_status=status, response_body=body))
+    record_response(db, student_id, term_id, request_key, fingerprint, status, body)
     db.flush()
     return status, body
+
+
+def confirm_selection_plan(db, student_id, term_id, plan_id, section_ids, actor_user_id, request_key):
+    """Revalidate and submit the selected part of an owned draft atomically."""
+    try:
+        term = get_term(db, term_id, 'share')
+        st = student_term(db, student_id, term_id, True)
+    except DomainError as error:
+        if error.code in ('TERM_NOT_FOUND', 'TERM_INELIGIBLE'):
+            raise DomainError(404, 'PLAN_NOT_FOUND', '找不到此學期的本人試排。') from None
+        raise
+    plan = db.scalar(select(SelectionPlan).where(
+        SelectionPlan.id == plan_id, SelectionPlan.student_id == student_id, SelectionPlan.term_id == term_id,
+    ).with_for_update().execution_options(populate_existing=True))
+    if plan is None:
+        raise DomainError(404, 'PLAN_NOT_FOUND', '找不到此學期的本人試排。')
+
+    ordered_ids = sorted(section_ids)
+    path = f'/api/v1/me/terms/{term_id}/selection-plans/{plan_id}/confirm'
+    fingerprint = request_fingerprint('POST', path, {'section_ids': ordered_ids})
+    replay = replay_response(db, student_id, term_id, request_key, fingerprint)
+    if replay is not None:
+        return replay
+    if plan.status == 'SUBMITTED':
+        raise DomainError(409, 'PLAN_ALREADY_SUBMITTED', '這份試排已確認。')
+    items = list(db.scalars(select(SelectionPlanItem).where(
+        SelectionPlanItem.plan_id == plan_id, SelectionPlanItem.section_id.in_(ordered_ids),
+    ).order_by(SelectionPlanItem.position)))
+    if len(items) != len(ordered_ids):
+        raise DomainError(409, 'PLAN_SELECTION_MISMATCH', '只能確認試排中的班別。')
+
+    # Lock in one consistent order across students. Validate and reply in plan order.
+    sections = {section_id: get_section(db, term_id, section_id, True) for section_id in ordered_ids}
+    at = now(db)
+    current_phase = phase(db, term, at)
+    if current_phase not in ('INITIAL', 'ADD_DROP'):
+        raise DomainError(409, 'REGISTRATION_CLOSED', REASONS['REGISTRATION_CLOSED'])
+    if current_phase != plan.phase or at >= plan.expires_at:
+        raise DomainError(409, 'PLAN_EXPIRED', '試排已過期或選課階段已切換，請重新試排。')
+
+    baseline = load_admission_state(db, st, term, include_pending=(current_phase == 'INITIAL'))
+    details_by_id = {row['id']: row for row in section_rows(db, ordered_ids)}
+    validated = []
+    for item in items:
+        details = details_by_id[item.section_id]
+        code, details_error = evaluate_admission(
+            term_id, details, baseline, current_phase, validated, keep_existing_pending=True,
+        )
+        if code:
+            raise DomainError(409, code, REASONS[code], {'section_id': item.section_id, **(details_error or {})})
+        validated.append(details)
+
+    results = []
+    for details in validated:
+        section = sections[details['id']]
+        if current_phase == 'INITIAL':
+            application = save_application(db, student_id, section, actor_user_id, at, plan_id)
+            status = application.status
+        else:
+            enrollment = enroll(db, student_id, term_id, section, 'ADD_DROP')
+            audit_enrollment(db, actor_user_id, enrollment, 'ENROLLED', plan_id)
+            status = enrollment.status
+        results.append({'section_id': section.id, 'status': status})
+
+    plan.status, plan.confirmed_at = 'SUBMITTED', at
+    body = jsonable_encoder({'plan_id': plan_id, 'phase': current_phase, 'items': results, 'submitted_at': at})
+    record_response(db, student_id, term_id, request_key, fingerprint, 200, body)
+    db.flush()
+    return 200, body
 
 
 def run_dict(run):
@@ -339,9 +534,10 @@ def allocate(db, term_id, actor_user_id):
     for sid, results in summaries.items():
         student = db.get(Student, sid)
         db.add(NotificationOutbox(event_key=f'allocation:{run.id}:{sid}', term_id=term_id, recipient_user_id=student.user_id,
-                                  type='ALLOCATION', payload={'term_code': term.code, 'run_id': run.id, 'results': results, 'url': '/applications'}))
-    audit(db, actor_user_id, term_id, 'ALLOCATION_PUBLISHED', 'allocation_run', run.id, run_dict(run))
+                                  type='ALLOCATION', payload={'term_code': term.code, 'run_id': run.id, 'results': results,
+                                  'url': '/applications?' + urlencode({'term': term_id})}))
     # Use the actual final publication instant; all result rows become visible together at commit.
     run.published_at = now(db)
+    audit(db, actor_user_id, term_id, 'ALLOCATION_PUBLISHED', 'allocation_run', run.id, run_dict(run))
     db.flush()
     return run_dict(run)

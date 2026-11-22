@@ -5,7 +5,7 @@ set -Eeuo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 caller_dir="$PWD"
 env_file="$project_dir/.env"
-scenario='add-drop'
+scenario='initial'
 seed_enabled=true
 build_enabled=true
 timeout_seconds=180
@@ -21,8 +21,8 @@ usage() {
 需要 Bash、Docker 與 Docker Compose plugin，以及 Docker daemon 使用權限。
 
 選項：
-  --scenario NAME   首次建立主學期的情境：initial / awaiting / add-drop / short
-                    預設 add-drop；既有學期的時程及選課紀錄不會重設。
+  --scenario NAME   建立主學期的情境：initial / awaiting / add-drop / short
+                    預設 initial。單學期模式可將舊的 115-1 示範時段轉為初選。
   --skip-seed       略過示範帳號與課程初始化，適合已有資料的部署。
   --no-build        使用既有映像檔，略過建置。
   --env-file PATH   指定環境檔；相對路徑以執行指令時的目錄為準。
@@ -211,5 +211,5 @@ frontend_url="$(local_url frontend 80)"
 api_url="$(local_url api 8000)"
 mailpit_url="$(local_url mailpit 8025)"
 printf '\n部署完成。\n選課系統：%s\nAPI 文件：%s/docs\nMailpit：%s\n' "$frontend_url" "$api_url" "$mailpit_url"
-printf '\n瀏覽器存取的網址須與環境檔 APP_ORIGIN 相同；修改連接埠或網域時請一併設定。\n'
+printf '\n瀏覽器網址須在 APP_ORIGIN 或 APP_ALLOWED_ORIGINS 設定中。\n'
 "${compose[@]}" ps --all

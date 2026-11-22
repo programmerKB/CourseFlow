@@ -1,102 +1,89 @@
 Catalog query
 SELECT * FROM v_public_section_catalog WHERE term_id=CAST(:term_id AS uuid) AND (code ILIKE :q OR title ILIKE :q) ORDER BY code,section_no,section_id LIMIT 20
 {"term_id": "8abc15dd-c1b8-53ed-a570-ae723e17a762", "q": "%課程%"}
-Limit  (cost=3.43..29.81 rows=20 width=203) (actual time=0.184..0.186 rows=20 loops=1)
-  Buffers: shared hit=136
-  ->  Incremental Sort  (cost=3.43..992.76 rows=750 width=203) (actual time=0.183..0.185 rows=20 loops=1)
+Limit  (cost=68.28..68.28 rows=1 width=2059) (actual time=5.609..5.612 rows=20 loops=1)
+  Buffers: shared hit=13856
+  ->  Sort  (cost=68.28..68.28 rows=1 width=2059) (actual time=5.608..5.610 rows=20 loops=1)
         Sort Key: c.code, s.section_no, s.id
-        Presorted Key: c.code
-        Full-sort Groups: 1  Sort Method: quicksort  Average Memory: 30kB  Peak Memory: 30kB
-        Buffers: shared hit=136
-        ->  Nested Loop Left Join  (cost=2.14..959.01 rows=750 width=203) (actual time=0.080..0.163 rows=21 loops=1)
-              Join Filter: (e.section_id = s_1.id)
-              Rows Removed by Join Filter: 42
-              Buffers: shared hit=136
-              ->  Nested Loop  (cost=1.10..929.82 rows=750 width=215) (actual time=0.070..0.147 rows=21 loops=1)
-                    Buffers: shared hit=135
-                    ->  Nested Loop  (cost=0.97..911.99 rows=750 width=205) (actual time=0.064..0.137 rows=21 loops=1)
-                          Join Filter: (d.id = c.department_id)
-                          Buffers: shared hit=133
-                          ->  Nested Loop  (cost=0.97..892.21 rows=750 width=189) (actual time=0.059..0.128 rows=21 loops=1)
-                                Buffers: shared hit=132
-                                ->  Nested Loop  (cost=0.97..881.78 rows=750 width=172) (actual time=0.051..0.116 rows=21 loops=1)
-                                      Buffers: shared hit=131
-                                      ->  Nested Loop  (cost=0.83..858.04 rows=1000 width=188) (actual time=0.036..0.096 rows=21 loops=1)
-                                            Buffers: shared hit=129
-                                            ->  Nested Loop  (cost=0.55..481.64 rows=1000 width=152) (actual time=0.029..0.070 rows=21 loops=1)
-                                                  Buffers: shared hit=66
-                                                  ->  Index Scan using courses_code_key on courses c  (cost=0.28..68.94 rows=999 width=92) (actual time=0.018..0.030 rows=21 loops=1)
+        Sort Method: top-N heapsort  Memory: 30kB
+        Buffers: shared hit=13856
+        ->  Nested Loop Left Join  (cost=10.64..68.27 rows=1 width=2059) (actual time=0.067..5.266 rows=988 loops=1)
+              Join Filter: (enrollments.section_id = s_1.id)
+              Rows Removed by Join Filter: 1976
+              Buffers: shared hit=13850
+              ->  Nested Loop  (cost=1.13..58.68 rows=1 width=2071) (actual time=0.048..4.393 rows=988 loops=1)
+                    Buffers: shared hit=13848
+                    ->  Nested Loop  (cost=0.98..58.43 rows=1 width=2087) (actual time=0.044..3.831 rows=988 loops=1)
+                          Buffers: shared hit=11872
+                          ->  Nested Loop  (cost=0.71..50.11 rows=1 width=2051) (actual time=0.037..2.959 rows=988 loops=1)
+                                Buffers: shared hit=8908
+                                ->  Nested Loop  (cost=0.56..43.18 rows=1 width=1535) (actual time=0.032..2.436 rows=988 loops=1)
+                                      Buffers: shared hit=6932
+                                      ->  Nested Loop  (cost=0.42..34.88 rows=1 width=1019) (actual time=0.025..1.858 rows=988 loops=1)
+                                            Buffers: shared hit=4956
+                                            ->  Nested Loop  (cost=0.28..26.70 rows=1 width=873) (actual time=0.019..1.315 rows=988 loops=1)
+                                                  Buffers: shared hit=2980
+                                                  ->  Seq Scan on courses c  (cost=0.00..18.40 rows=1 width=726) (actual time=0.013..0.301 rows=988 loops=1)
                                                         Filter: (((code)::text ~~* '%課程%'::text) OR ((title)::text ~~* '%課程%'::text))
-                                                        Buffers: shared hit=3
-                                                  ->  Index Scan using uq_section_number on sections s  (cost=0.28..0.40 rows=1 width=76) (actual time=0.001..0.002 rows=1 loops=21)
+                                                        Rows Removed by Filter: 11
+                                                        Buffers: shared hit=16
+                                                  ->  Index Scan using uq_section_number on sections s  (cost=0.28..8.29 rows=1 width=163) (actual time=0.001..0.001 rows=1 loops=988)
                                                         Index Cond: ((term_id = '8abc15dd-c1b8-53ed-a570-ae723e17a762'::uuid) AND (course_id = c.id))
-                                                        Buffers: shared hit=63
-                                            ->  Index Scan using sections_pkey on sections s_1  (cost=0.28..0.38 rows=1 width=36) (actual time=0.001..0.001 rows=1 loops=21)
-                                                  Index Cond: (id = s.id)
-                                                  Buffers: shared hit=63
-                                      ->  Memoize  (cost=0.14..0.17 rows=1 width=16) (actual time=0.001..0.001 rows=1 loops=21)
-                                            Cache Key: s_1.term_id
-                                            Cache Mode: logical
-                                            Hits: 20  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
-                                            Buffers: shared hit=2
-                                            ->  Index Scan using terms_pkey on terms t_1  (cost=0.13..0.16 rows=1 width=16) (actual time=0.013..0.013 rows=1 loops=1)
-                                                  Index Cond: (id = s_1.term_id)
+                                                        Buffers: shared hit=2964
+                                            ->  Index Scan using terms_pkey on terms t  (cost=0.15..8.17 rows=1 width=162) (actual time=0.000..0.000 rows=1 loops=988)
+                                                  Index Cond: (id = '8abc15dd-c1b8-53ed-a570-ae723e17a762'::uuid)
                                                   Filter: (catalog_published_at IS NOT NULL)
-                                                  Buffers: shared hit=2
-                                ->  Materialize  (cost=0.00..1.05 rows=1 width=33) (actual time=0.000..0.000 rows=1 loops=21)
-                                      Buffers: shared hit=1
-                                      ->  Seq Scan on terms t  (cost=0.00..1.05 rows=1 width=33) (actual time=0.004..0.005 rows=1 loops=1)
-                                            Filter: ((catalog_published_at IS NOT NULL) AND (id = '8abc15dd-c1b8-53ed-a570-ae723e17a762'::uuid))
-                                            Rows Removed by Filter: 3
-                                            Buffers: shared hit=1
-                          ->  Materialize  (cost=0.00..1.03 rows=2 width=32) (actual time=0.000..0.000 rows=1 loops=21)
-                                Buffers: shared hit=1
-                                ->  Seq Scan on departments d  (cost=0.00..1.02 rows=2 width=32) (actual time=0.004..0.004 rows=1 loops=1)
-                                      Buffers: shared hit=1
-                    ->  Memoize  (cost=0.14..0.17 rows=1 width=26) (actual time=0.000..0.000 rows=1 loops=21)
-                          Cache Key: s.instructor_id
-                          Cache Mode: logical
-                          Hits: 20  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+                                                  Buffers: shared hit=1976
+                                      ->  Index Scan using departments_pkey on departments d  (cost=0.14..8.16 rows=1 width=532) (actual time=0.000..0.000 rows=1 loops=988)
+                                            Index Cond: (id = c.department_id)
+                                            Buffers: shared hit=1976
+                                ->  Index Scan using instructors_pkey on instructors i  (cost=0.14..6.83 rows=1 width=532) (actual time=0.000..0.000 rows=1 loops=988)
+                                      Index Cond: (id = s.instructor_id)
+                                      Buffers: shared hit=1976
+                          ->  Index Scan using uq_section_identity on sections s_1  (cost=0.28..8.29 rows=1 width=36) (actual time=0.001..0.001 rows=1 loops=988)
+                                Index Cond: (id = s.id)
+                                Buffers: shared hit=2964
+                    ->  Index Scan using terms_pkey on terms t_1  (cost=0.15..0.25 rows=1 width=16) (actual time=0.000..0.000 rows=1 loops=988)
+                          Index Cond: (id = s_1.term_id)
+                          Filter: (catalog_published_at IS NOT NULL)
+                          Buffers: shared hit=1976
+              ->  GroupAggregate  (cost=9.50..9.54 rows=2 width=24) (actual time=0.000..0.001 rows=2 loops=988)
+                    Group Key: enrollments.section_id
+                    Buffers: shared hit=2
+                    ->  Sort  (cost=9.50..9.51 rows=2 width=16) (actual time=0.000..0.000 rows=2 loops=988)
+                          Sort Key: enrollments.section_id
+                          Sort Method: quicksort  Memory: 25kB
                           Buffers: shared hit=2
-                          ->  Index Scan using instructors_pkey on instructors i  (cost=0.13..0.16 rows=1 width=26) (actual time=0.005..0.005 rows=1 loops=1)
-                                Index Cond: (id = s.instructor_id)
+                          ->  Bitmap Heap Scan on enrollments  (cost=4.15..9.49 rows=2 width=16) (actual time=0.005..0.006 rows=2 loops=1)
+                                Recheck Cond: ((status)::text = 'ENROLLED'::text)
+                                Heap Blocks: exact=1
                                 Buffers: shared hit=2
-              ->  Materialize  (cost=1.03..1.08 rows=2 width=24) (actual time=0.000..0.000 rows=2 loops=21)
-                    Buffers: shared hit=1
-                    ->  Subquery Scan on e  (cost=1.03..1.07 rows=2 width=24) (actual time=0.006..0.007 rows=2 loops=1)
-                          Buffers: shared hit=1
-                          ->  HashAggregate  (cost=1.03..1.05 rows=2 width=24) (actual time=0.006..0.006 rows=2 loops=1)
-                                Group Key: enrollments.section_id
-                                Batches: 1  Memory Usage: 24kB
-                                Buffers: shared hit=1
-                                ->  Seq Scan on enrollments  (cost=0.00..1.02 rows=2 width=16) (actual time=0.003..0.003 rows=2 loops=1)
-                                      Filter: ((status)::text = 'ENROLLED'::text)
+                                ->  Bitmap Index Scan on uq_enrolled_course  (cost=0.00..4.15 rows=2 width=0) (actual time=0.002..0.002 rows=2 loops=1)
                                       Buffers: shared hit=1
 Planning:
-  Buffers: shared hit=227
-Planning Time: 3.737 ms
-Execution Time: 0.340 ms
+  Buffers: shared hit=82
+Planning Time: 2.539 ms
+Execution Time: 5.716 ms
 
 Availability query
 SELECT * FROM v_section_availability WHERE section_id=CAST(:section_id AS uuid)
 {"section_id": "722116c4-c641-5c41-ac60-41712f74c798"}
-Nested Loop Left Join  (cost=0.28..10.44 rows=1 width=60) (actual time=0.012..0.013 rows=1 loops=1)
-  Buffers: shared hit=5
-  ->  Nested Loop  (cost=0.28..9.37 rows=1 width=52) (actual time=0.008..0.008 rows=1 loops=1)
-        Join Filter: (s.term_id = t.id)
-        Buffers: shared hit=4
-        ->  Index Scan using uq_section_identity on sections s  (cost=0.28..8.29 rows=1 width=52) (actual time=0.004..0.005 rows=1 loops=1)
+Nested Loop Left Join  (cost=0.57..24.71 rows=1 width=60) (actual time=0.033..0.034 rows=1 loops=1)
+  Buffers: shared hit=7
+  ->  Nested Loop  (cost=0.42..16.50 rows=1 width=52) (actual time=0.006..0.007 rows=1 loops=1)
+        Buffers: shared hit=5
+        ->  Index Scan using uq_section_identity on sections s  (cost=0.28..8.29 rows=1 width=52) (actual time=0.003..0.004 rows=1 loops=1)
               Index Cond: (id = '722116c4-c641-5c41-ac60-41712f74c798'::uuid)
               Buffers: shared hit=3
-        ->  Seq Scan on terms t  (cost=0.00..1.04 rows=3 width=16) (actual time=0.002..0.002 rows=1 loops=1)
+        ->  Index Scan using terms_pkey on terms t  (cost=0.15..8.17 rows=1 width=16) (actual time=0.002..0.002 rows=1 loops=1)
+              Index Cond: (id = s.term_id)
               Filter: (catalog_published_at IS NOT NULL)
-              Rows Removed by Filter: 1
-              Buffers: shared hit=1
-  ->  GroupAggregate  (cost=0.00..1.04 rows=1 width=24) (actual time=0.003..0.003 rows=1 loops=1)
-        Buffers: shared hit=1
-        ->  Seq Scan on enrollments  (cost=0.00..1.03 rows=1 width=16) (actual time=0.002..0.002 rows=1 loops=1)
-              Filter: (((status)::text = 'ENROLLED'::text) AND (section_id = '722116c4-c641-5c41-ac60-41712f74c798'::uuid))
-              Rows Removed by Filter: 1
-              Buffers: shared hit=1
-Planning Time: 0.133 ms
-Execution Time: 0.025 ms
+              Buffers: shared hit=2
+  ->  GroupAggregate  (cost=0.14..8.17 rows=1 width=24) (actual time=0.025..0.025 rows=1 loops=1)
+        Buffers: shared hit=2
+        ->  Index Only Scan using ix_enrolled_section on enrollments  (cost=0.14..8.16 rows=1 width=16) (actual time=0.023..0.024 rows=1 loops=1)
+              Index Cond: (section_id = '722116c4-c641-5c41-ac60-41712f74c798'::uuid)
+              Heap Fetches: 1
+              Buffers: shared hit=2
+Planning Time: 0.155 ms
+Execution Time: 0.047 ms

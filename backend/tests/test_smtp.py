@@ -16,11 +16,11 @@ class FakeSMTP:
         self.calls = []
         self.message = None
 
-    def __enter__(self):
-        return self
+    def quit(self):
+        return 221, b'bye'
 
-    def __exit__(self, *args):
-        return False
+    def close(self):
+        pass
 
     def ehlo_or_helo_if_needed(self):
         self.ehlo()
@@ -67,6 +67,37 @@ def test_mailpit_without_credentials_sends(job, monkeypatch):
     worker.send_smtp(job)
     assert smtp.calls == ['ehlo', 'send']
     assert smtp.message['Message-ID'] == '<outbox-test-smtp-id@course-registration.example.test>'
+
+
+def test_initial_receipt_renders_pending_status_and_every_course(job, monkeypatch):
+    smtp = FakeSMTP()
+    install_fake(monkeypatch, smtp)
+    job['type'] = 'INITIAL_RECEIPT'
+    job['payload'] = {'term_code': '115-1', 'url': '/applications?term=example-term', 'sections': [
+        {'code': 'CS101', 'title': '程式設計', 'section_no': 'A'},
+        {'code': 'EE101', 'title': '電路學', 'section_no': 'B'},
+    ]}
+    worker.send_smtp(job)
+    assert str(smtp.message['Subject']) == '115-1 初選登記確認'
+    body = smtp.message.get_content()
+    assert '等待初選分發' in body
+    assert 'CS101 程式設計（A 班）' in body and 'EE101 電路學（B 班）' in body
+    assert '/applications?term=example-term' in body
+
+
+def test_smtp_quit_failure_preserves_acceptance_and_old_term_link(job, monkeypatch, caplog):
+    smtp = FakeSMTP()
+    monkeypatch.setattr(smtp, 'quit', lambda: (421, b'temporarily unavailable'))
+    install_fake(monkeypatch, smtp)
+    job['term_id'] = 'example-term'
+    job['payload']['url'] = '/timetable'
+    monkeypatch.setattr(worker, 'claim_one', lambda: job)
+    completed = []
+    monkeypatch.setattr(worker, 'finish', lambda _, error: completed.append(error) or True)
+    assert worker.process_one()
+    assert completed == [None]
+    assert '/timetable?term=example-term' in smtp.message.get_content()
+    assert 'SMTP_QUIT_REJECTED' in caplog.text
 
 
 def test_mailpit_with_credentials_reports_auth_unsupported(job, monkeypatch):

@@ -100,6 +100,20 @@ class Course(Base):
     description = Column(Text, nullable=False, server_default='')
 
 
+class Topic(Base):
+    __tablename__ = 'topics'
+    id = ident()
+    code = Column(String(64), nullable=False, unique=True)
+    label = Column(String(100), nullable=False)
+
+
+class CourseTopic(Base):
+    __tablename__ = 'course_topics'
+    course_id = ref('courses', primary_key=True)
+    topic_id = ref('topics', primary_key=True)
+    __table_args__ = (Index('ix_course_topics_topic_course', 'topic_id', 'course_id'),)
+
+
 class Section(Base):
     __tablename__ = 'sections'
     id = ident()
@@ -197,6 +211,46 @@ class Enrollment(Base):
                       Index('ix_enrolled_section', 'section_id', postgresql_where=text("status = 'ENROLLED'")))
 
 
+class SelectionPlan(Base):
+    __tablename__ = 'selection_plans'
+    id = ident()
+    student_id = Column(UUID(as_uuid=False), nullable=False)
+    term_id = Column(UUID(as_uuid=False), nullable=False)
+    phase = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False, server_default='DRAFT')
+    created_at = stamp()
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    confirmed_at = Column(DateTime(timezone=True))
+    __table_args__ = (
+        ForeignKeyConstraint(['student_id', 'term_id'], ['student_terms.student_id', 'student_terms.term_id'],
+                             ondelete='RESTRICT', name='fk_plan_student_term'),
+        UniqueConstraint('id', 'term_id', name='uq_plan_term'),
+        CheckConstraint("phase IN ('INITIAL','ADD_DROP')", name='ck_plan_phase'),
+        CheckConstraint("status IN ('DRAFT','SUBMITTED')", name='ck_plan_status'),
+        CheckConstraint('created_at < expires_at', name='ck_plan_expiry'),
+        CheckConstraint("(status = 'SUBMITTED') = (confirmed_at IS NOT NULL)", name='ck_plan_confirmation'),
+        Index('ix_plan_student_term', 'student_id', 'term_id'),
+    )
+
+
+class SelectionPlanItem(Base):
+    __tablename__ = 'selection_plan_items'
+    plan_id = Column(UUID(as_uuid=False), primary_key=True)
+    section_id = Column(UUID(as_uuid=False), primary_key=True)
+    term_id = Column(UUID(as_uuid=False), nullable=False)
+    course_id = Column(UUID(as_uuid=False), nullable=False)
+    position = Column(Integer, nullable=False)
+    __table_args__ = (
+        ForeignKeyConstraint(['plan_id', 'term_id'], ['selection_plans.id', 'selection_plans.term_id'],
+                             ondelete='RESTRICT', name='fk_plan_item_plan'),
+        ForeignKeyConstraint(['section_id', 'term_id', 'course_id'], ['sections.id', 'sections.term_id', 'sections.course_id'],
+                             ondelete='RESTRICT', name='fk_plan_item_section'),
+        UniqueConstraint('plan_id', 'position', name='uq_plan_item_position'),
+        UniqueConstraint('plan_id', 'course_id', name='uq_plan_item_course'),
+        CheckConstraint('position BETWEEN 1 AND 5', name='ck_plan_item_position'),
+    )
+
+
 class AuditEvent(Base):
     __tablename__ = 'audit_events'
     id = ident()
@@ -219,7 +273,7 @@ class IdempotencyKey(Base):
     response_body = Column(JSONB, nullable=False)
     created_at = stamp()
     __table_args__ = (ForeignKeyConstraint(['student_id', 'term_id'], ['student_terms.student_id', 'student_terms.term_id'], ondelete='RESTRICT'),
-                      CheckConstraint('response_status IN (201,204)', name='ck_idempotency_success'))
+                      CheckConstraint('response_status IN (200,201,204)', name='ck_idempotency_success'))
 
 
 class NotificationOutbox(Base):

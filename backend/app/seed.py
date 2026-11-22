@@ -1,14 +1,16 @@
-"""Idempotent synthetic fixtures. Existing terms, periods and registrations are never reset."""
+"""Idempotent synthetic fixtures and a guarded switch from the old demo to 115-1 initial registration."""
 import argparse
 from datetime import datetime, date, time, timedelta, timezone
 from uuid import uuid5, NAMESPACE_URL
 from decimal import Decimal
-from sqlalchemy import select
+from sqlalchemy import or_, select, text
+from .config import settings
 from .db import SessionLocal
 from .models import (User, Department, Student, Instructor, Term, RegistrationPeriod, StudentTerm, Course,
                      Section, SectionMeeting, SectionPrerequisite, CourseCompletion, Application,
-                     Enrollment, AllocationRun)
+                     Enrollment, AllocationRun, AuditEvent, NotificationOutbox, Topic, CourseTopic)
 from .auth import hash_password
+from .registration import audit
 
 
 def uid(name):
@@ -24,11 +26,128 @@ def add(db, model, key, **values):
     return row
 
 
-def seed(mode='add-drop'):
+def seed_recommendation(db, current, department, *, main_only=False):
+    topics = {'llm': '大語言模型', 'nlp': '自然語言處理', 'retrieval': '資訊檢索',
+              'deep_learning': '深度學習', 'ml_systems': '機器學習系統'}
+    for code, label in topics.items():
+        topic_id = uid('topic/' + code)
+        add(db, Topic, topic_id, id=topic_id, code=code, label=label)
+
+    demo = [
+        ('DEMO-501', '大型語言模型專題', '語言模型微調、對齊與評估。', 'llm', 4, 2, '13:20', '16:20'),
+        ('DEMO-502', '自然語言處理', '語言表示、序列建模與 NLP 評估。', 'nlp', 6, 1, '09:10', '12:10'),
+        ('DEMO-503', '資訊檢索與 RAG', '文件檢索、排序及檢索增強生成。', 'retrieval', 2, 3, '10:10', '13:10'),
+        ('DEMO-504', 'AI 系統與模型部署', '推論延遲、模型量化與服務部署。', 'ml_systems', 3, 4, '13:20', '16:20'),
+        ('DEMO-505', '向量資料庫與語意搜尋', 'Embeddings、向量索引與語意搜尋。', 'retrieval', 1, 5, '10:10', '13:10'),
+    ]
+    for code, title, description, topic, *_ in demo:
+        course_id, topic_id = uid('course/' + code), uid('topic/' + topic)
+        add(db, Course, course_id, id=course_id, code=code, title=title, description=description, department_id=department)
+        add(db, CourseTopic, (course_id, topic_id), course_id=course_id, topic_id=topic_id)
+
+    baseline = [('CS101', 1, '13:30', '16:30'), ('CS201', 4, '13:20', '16:20'),
+                ('CS302', 5, '13:30', '16:30')]
+    terms = [('main', None)] if main_only else [
+        ('recommendation-add-drop', '115-4 研究方向推薦示範'),
+        ('recommendation-initial', '115-5 研究方向初選示範'),
+    ]
+    for slug, label in terms:
+        tid = uid('term/' + slug)
+        add_drop = slug == 'recommendation-add-drop'
+        new_term = not main_only and db.get(Term, tid) is None
+        if new_term:
+            add(db, Term, tid, id=tid, code=label, start_date=date(2027, 2, 1), end_date=date(2027, 6, 30),
+                catalog_published_at=current, allocation_seed='research-demo-v2')
+        if new_term:
+            if add_drop:
+                windows = (-7, -2, -1, 30)
+            else:
+                windows = (-1, 7, 8, 30)
+            a, b, c, d = (current + timedelta(days=offset) for offset in windows)
+            db.add_all([
+                RegistrationPeriod(term_id=tid, kind='INITIAL', starts_at=a, ends_at=b),
+                RegistrationPeriod(term_id=tid, kind='ADD_DROP', starts_at=c, ends_at=d),
+            ])
+        section_specs = [(row[0], *row[4:]) for row in demo]
+        if not main_only:
+            for n in range(1, 21):
+                sid = uid(f'student/student{n:02}')
+                add(db, StudentTerm, (sid, tid), student_id=sid, term_id=tid, credit_limit=Decimal('18.0'))
+            section_specs += [(code, 30, day, start, end) for code, day, start, end in baseline]
+        for code, capacity, day, start, end in section_specs:
+            sid = uid(f'section/{slug}/{code}/A')
+            add(db, Section, sid, id=sid, term_id=tid, course_id=uid('course/' + code), section_no='A',
+                instructor_id=uid('teacher/chen'), credits=Decimal('3.0'), capacity=capacity, is_selectable=True)
+            meeting_id = uid('meeting/' + sid + '/0')
+            add(db, SectionMeeting, meeting_id, id=meeting_id, section_id=sid, weekday=day,
+                start_time=time.fromisoformat(start), end_time=time.fromisoformat(end), room='TR-501')
+            if code == 'DEMO-501':
+                required_id = uid('course/CS201')
+                add(db, SectionPrerequisite, (sid, required_id), section_id=sid, required_course_id=required_id)
+        if new_term and add_drop:
+            db.add(AllocationRun(id=uid('run/' + slug), term_id=tid, algorithm_version='v1', seed='research-demo-v2',
+                                 published_at=current - timedelta(days=1), accepted_count=0, rejected_count=0))
+            # Baseline gives student01 9 credits, and DEMO-505 has no remaining seats.
+            existing = [('student01', code) for code, *_ in baseline] + [('student19', 'DEMO-505')]
+            for login, code in existing:
+                db.add(Enrollment(id=uid(f'enrollment/{slug}/{login}/{code}'), student_id=uid('student/' + login),
+                                  term_id=tid, course_id=uid('course/' + code), section_id=uid(f'section/{slug}/{code}/A'),
+                                  status='ENROLLED', source='INITIAL'))
+
+
+def reopen_seeded_initial(db, term_id, current):
+    """Replace only the synthetic zero-result run from the old add-drop demo."""
+    term = db.scalar(select(Term).where(Term.id == term_id).with_for_update()
+                     .execution_options(populate_existing=True))
+    run = db.get(AllocationRun, uid('run/main'))
+    initial = db.get(RegistrationPeriod, (term_id, 'INITIAL'))
+    add_drop = db.get(RegistrationPeriod, (term_id, 'ADD_DROP'))
+    if not (term and term.catalog_published_at and run and initial and add_drop):
+        return False
+    seeded_at = term.catalog_published_at
+    if (run.term_id != term_id or run.algorithm_version != 'v1' or run.seed != term.allocation_seed
+            or run.accepted_count or run.rejected_count
+            or run.published_at != add_drop.starts_at
+            or (initial.starts_at, initial.ends_at, add_drop.starts_at, add_drop.ends_at)
+            != tuple(seeded_at + timedelta(days=offset) for offset in (-7, -2, -1, 30))):
+        return False
+    has_results = db.scalar(select(Application.id).where(
+        Application.term_id == term_id,
+        or_(Application.allocation_run_id.is_not(None), Application.status.in_(('ACCEPTED', 'REJECTED'))),
+    ).limit(1))
+    has_publication = db.scalar(select(AuditEvent.id).where(
+        AuditEvent.term_id == term_id, AuditEvent.action == 'ALLOCATION_PUBLISHED',
+    ).limit(1))
+    has_notices = db.scalar(select(NotificationOutbox.id).where(
+        NotificationOutbox.term_id == term_id, NotificationOutbox.type == 'ALLOCATION',
+    ).limit(1))
+    if has_results or has_publication or has_notices:
+        return False
+
+    audit(db, None, term_id, 'DEMO_INITIAL_REOPENED', 'allocation_run', run.id, {
+        'previous_run': {'published_at': run.published_at, 'algorithm_version': run.algorithm_version,
+                         'seed': run.seed, 'accepted_count': run.accepted_count, 'rejected_count': run.rejected_count},
+        'previous_periods': [{'kind': p.kind, 'starts_at': p.starts_at, 'ends_at': p.ends_at}
+                             for p in (initial, add_drop)],
+    })
+    db.delete(run)
+    add_drop_duration = add_drop.ends_at - add_drop.starts_at
+    initial.starts_at = current
+    initial.ends_at = current + timedelta(days=7)
+    # Keep the legacy window well ordered for deployments that later enable it.
+    add_drop.starts_at = initial.ends_at + timedelta(days=1)
+    add_drop.ends_at = add_drop.starts_at + add_drop_duration
+    return True
+
+
+def seed(mode='add-drop', *, recommendation_demo=False):
     current = datetime.now(timezone.utc)
+    main_term_id = uid('term/main')
+    main_only = settings.public_initial_term_id == main_term_id
+    reopened = False
     with SessionLocal.begin() as db:
         # Serialise concurrent invocations and retain all user-created records.
-        db.execute(__import__('sqlalchemy').text("SELECT pg_advisory_xact_lock(73111021)"))
+        db.execute(text('SELECT pg_advisory_xact_lock(73111021)'))
         cs, ee = uid('dep/CS'), uid('dep/EE')
         for code, name in [('CS', '資訊工程系'), ('EE', '電子工程系')]:
             add(db, Department, uid('dep/' + code), id=uid('dep/' + code), code=code, name=name)
@@ -63,15 +182,19 @@ def seed(mode='add-drop'):
             sid = uid(f'student/student{n:02}')
             for c in ('CS101', 'CS201'):
                 add(db, CourseCompletion, (sid, uid('course/' + c), history.id), student_id=sid, course_id=uid('course/' + c), completed_term_id=history.id)
-        specs = [('main', '115-1 示範學期', mode), ('initial', '115-2 初選登記示範', 'initial')]
-        if mode in ('initial', 'short') and db.get(Term, uid('term/main')) is None:
-            specs.append(('practice', '115-3 加退選練習', 'add-drop'))
+        specs = [('main', '115-1 示範學期', mode)]
+        if not main_only:
+            specs.append(('initial', '115-2 初選登記示範', 'initial'))
+            if mode in ('initial', 'short') and db.get(Term, main_term_id) is None:
+                specs.append(('practice', '115-3 加退選練習', 'add-drop'))
         for slug, code, scenario in specs:
             tid = uid('term/' + slug)
             exists = db.get(Term, tid) is not None
             term = add(db, Term, tid, id=tid, code=code, start_date=date(2026, 9, 1) if slug == 'main' else date(2027, 2, 1),
                        end_date=date(2027, 1, 31) if slug == 'main' else date(2027, 6, 30),
                        catalog_published_at=current, allocation_seed='ntust-2026-fixed-seed')
+            if exists and main_only and scenario == 'initial':
+                reopened = reopen_seeded_initial(db, tid, current)
             if not exists:
                 if scenario == 'short':
                     a, b, c, d = current - timedelta(minutes=1), current + timedelta(minutes=3), current + timedelta(minutes=3), current + timedelta(minutes=30)
@@ -120,10 +243,22 @@ def seed(mode='add-drop'):
                     for n in (1, 2):
                         db.add(Application(id=uid(f'application/{slug}/{n}'), student_id=uid(f'student/student{n:02}'),
                                            term_id=tid, course_id=uid('course/CS303'), section_id=uid(f'section/{slug}/CS303/A'), status='PENDING'))
-    return {'mode': mode, 'main_term_id': uid('term/main'), 'initial_term_id': uid('term/initial')}
+        if recommendation_demo:
+            seed_recommendation(db, current, cs, main_only=main_only)
+    result = {'mode': mode, 'main_term_id': main_term_id,
+              'initial_term_id': main_term_id if main_only else uid('term/initial')}
+    if main_only:
+        result['main_initial_reopened'] = reopened
+        if recommendation_demo:
+            result['recommendation_initial_term_id'] = main_term_id
+    elif recommendation_demo:
+        result.update(recommendation_term_id=uid('term/recommendation-add-drop'),
+                      recommendation_initial_term_id=uid('term/recommendation-initial'))
+    return result
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--scenario', choices=['initial', 'awaiting', 'add-drop', 'short'], default='add-drop')
-    print(seed(parser.parse_args().scenario))
+    parser.add_argument('--scenario', choices=['initial', 'awaiting', 'add-drop', 'short'],
+                        default='initial' if settings.public_initial_term_id == uid('term/main') else 'add-drop')
+    print(seed(parser.parse_args().scenario, recommendation_demo=True))

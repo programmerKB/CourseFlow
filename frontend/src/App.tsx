@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useRef,
   type ReactNode,
   type FormEvent,
@@ -12,6 +13,7 @@ import {
   PHASES,
   STATUS,
   dateTime,
+  newRequestKey,
   short,
   type User,
   type Term,
@@ -22,7 +24,10 @@ import {
   type Page,
   type Source,
   type Meeting,
+  type ChatResponse,
+  type Eligibility,
 } from "./api";
+import RecommendationCard from "./RecommendationCard";
 
 type View =
   | "courses"
@@ -32,6 +37,11 @@ type View =
   | "admin"
   | "rules";
 type Mutation = (path: string, method: string, body?: unknown) => Promise<any>;
+type ChatMessage = Partial<ChatResponse> & {
+  role: "user" | "assistant";
+  answer: string;
+  prompt?: string;
+};
 const NAV: { id: View; label: string; icon: string }[] = [
   { id: "courses", label: "課程查詢", icon: "▦" },
   { id: "applications", label: "我的選課", icon: "☷" },
@@ -47,6 +57,15 @@ const route = (): View => {
 };
 const message = (e: unknown) =>
   e instanceof Error ? e.message : "操作未完成，請重新嘗試。";
+
+function removeUnavailableTermLink(list: Term[], url: URL) {
+  const linkedTerm = url.searchParams.get("term");
+  if (!linkedTerm || list.some((term) => term.id === linkedTerm)) return false;
+  url.searchParams.delete("term");
+  url.searchParams.delete("section");
+  return true;
+}
+
 function Badge({
   status,
   children,
@@ -225,22 +244,18 @@ export default function App() {
     ),
     [detail, setDetail] = useState<Section | null>(null),
     [detailError, setDetailError] = useState(""),
-    [check, setCheck] = useState<any>(null);
+    [check, setCheck] = useState<Eligibility | null>(null),
+    [checking, setChecking] = useState(false);
   const [confirmation, setConfirmation] = useState<{
     section: Section;
     action: "apply" | "cancel" | "add" | "drop";
   } | null>(null);
   const [chatInput, setChatInput] = useState(""),
     [chatBusy, setChatBusy] = useState(false),
-    [messages, setMessages] = useState<
-      {
-        role: string;
-        answer: string;
-        sources?: Source[];
-        as_of?: string;
-        mode?: string;
-      }[]
-    >([]);
+    [messages, setMessages] = useState<ChatMessage[]>([]);
+  const chatRequest = useRef<AbortController | null>(null);
+  const eligibilityRequest = useRef<AbortController | null>(null);
+  const transcript = useRef<HTMLDivElement>(null);
   const pendingKeys = useRef(new Map<string, string>()),
     operations = useRef(new Set<string>());
   const term = terms.find((t) => t.id === termId),
@@ -252,38 +267,47 @@ export default function App() {
     history.pushState({}, "", `/${next}`);
   }
   function openSource(s: Source) {
-    if (s.term_id) setTermId(s.term_id);
-    if (s.section_id) {
-      setSelectedId(s.section_id);
-      navigate("courses");
-    } else {
-      const target = new URL(s.url, location.origin);
-      if (target.origin === location.origin) {
-        history.pushState({}, "", target.pathname + target.search);
-        setView(route());
-      }
+    const target = new URL(s.url, location.origin);
+    if (target.origin !== location.origin) return;
+    if (s.term_id && !terms.some((t) => t.id === s.term_id)) {
+      setToast("這個學期目前無法瀏覽。");
+      return;
     }
+    const hidden = removeUnavailableTermLink(terms, target);
+    const linkedTerm = s.term_id || target.searchParams.get("term");
+    if (linkedTerm) setTermId(linkedTerm);
+    setSelectedId(hidden ? null : s.section_id || target.searchParams.get("section"));
+    history.pushState({}, "", target.pathname + target.search);
+    setView(route());
   }
   useEffect(() => {
     const listener = () => {
       setView(route());
-      const p = new URLSearchParams(location.search);
-      if (p.get("term")) setTermId(p.get("term")!);
-      setSelectedId(p.get("section"));
+      if (boot) return;
+      const url = new URL(location.href);
+      if (removeUnavailableTermLink(terms, url)) history.replaceState(history.state, "", url);
+      const linkedTerm = url.searchParams.get("term");
+      if (linkedTerm) setTermId(linkedTerm);
+      setSelectedId(url.searchParams.get("section"));
     };
     addEventListener("popstate", listener);
     return () => removeEventListener("popstate", listener);
-  }, []);
+  }, [boot, terms]);
   async function loadTerms(knownUser: User | null = user, selected?: string) {
     const list = await api<Term[]>(
       knownUser?.role === "ADMIN" ? "/admin/terms" : "/terms",
     );
+    const url = new URL(location.href);
+    if (removeUnavailableTermLink(list, url)) {
+      history.replaceState(history.state, "", url);
+      setSelectedId(null);
+    }
     setTerms(list);
     setTermId((previous) => {
       const wanted =
         selected ||
         previous ||
-        new URLSearchParams(location.search).get("term") ||
+        url.searchParams.get("term") ||
         localStorage.getItem("course-term");
       return (
         list.find((t) => t.id === wanted)?.id ||
@@ -324,10 +348,29 @@ export default function App() {
   }, [filters]);
   useEffect(() => {
     if (termId) localStorage.setItem("course-term", termId);
+  }, [termId]);
+  useLayoutEffect(() => {
+    setCatalog(null);
+    setPage(1);
+  }, [termId]);
+  useLayoutEffect(() => {
     setMessages([]);
+    setChatInput("");
+    setChatBusy(false);
     setApps([]);
     setTable(null);
+    setConfirmation(null);
+    return () => {
+      chatRequest.current?.abort();
+      chatRequest.current = null;
+    };
   }, [termId, user?.id]);
+  useEffect(() => {
+    const list = transcript.current;
+    if (!list || !list.lastElementChild) return;
+    const last = list.lastElementChild.getBoundingClientRect();
+    list.scrollTop += last.top - list.getBoundingClientRect().top - 20;
+  }, [messages.length, chatBusy, view]);
   useEffect(() => {
     if (!termId) return;
     let active = true;
@@ -359,12 +402,11 @@ export default function App() {
       page_size: "20",
       ...Object.fromEntries(Object.entries(debounced).filter(([, v]) => v)),
     });
-    const path =
-      admin && !term?.catalog_published_at
-        ? `/admin/terms/${termId}/sections?page=${page}&page_size=20`
-        : `/terms/${termId}/sections?${params}`;
+    const path = `${admin ? "/admin" : ""}/terms/${termId}/sections?${params}`;
     api<Page>(path, { signal: control.signal })
-      .then(setCatalog)
+      .then((value) => {
+        if (!control.signal.aborted) setCatalog(value);
+      })
       .catch((e) => {
         if (!control.signal.aborted) setError(message(e));
       })
@@ -379,7 +421,6 @@ export default function App() {
     revision,
     view,
     admin,
-    term?.catalog_published_at,
   ]);
   useEffect(() => {
     if (!termId || !student) {
@@ -410,39 +451,74 @@ export default function App() {
       active = false;
     };
   }, [termId, user?.id, revision]);
-  useEffect(() => {
-    if (!selectedId || !termId) return;
+  useLayoutEffect(() => {
+    setCheck(null);
+    setChecking(false);
+    return () => {
+      eligibilityRequest.current?.abort();
+      eligibilityRequest.current = null;
+    };
+  }, [selectedId, termId, user?.id, revision]);
+  useLayoutEffect(() => {
     const control = new AbortController();
     setDetail(null);
     setDetailError("");
-    setCheck(null);
-    api<Section>(`/terms/${termId}/sections/${selectedId}`, {
+    if (!selectedId || !termId) return;
+    api<Section>(`${admin ? "/admin" : ""}/terms/${termId}/sections/${selectedId}`, {
       signal: control.signal,
     })
-      .then(setDetail)
+      .then((value) => {
+        if (!control.signal.aborted) setDetail(value);
+      })
       .catch((e) => {
         if (!control.signal.aborted) setDetailError(message(e));
       });
     return () => control.abort();
-  }, [selectedId, termId, revision]);
+  }, [selectedId, termId, user?.id, revision, admin]);
+  async function checkEligibility(sectionId: string) {
+    if (eligibilityRequest.current) return;
+    const control = new AbortController();
+    eligibilityRequest.current = control;
+    setChecking(true);
+    setCheck(null);
+    try {
+      const result = await api<Eligibility>(
+        `/me/terms/${termId}/sections/${sectionId}/eligibility`,
+        { signal: control.signal },
+      );
+      if (!control.signal.aborted) setCheck(result);
+    } catch (e) {
+      if (!control.signal.aborted) setToast(message(e));
+    } finally {
+      if (eligibilityRequest.current === control) {
+        eligibilityRequest.current = null;
+        setChecking(false);
+      }
+    }
+  }
   const mutate: Mutation = async (path, method, body) => {
-    const signature = method + path + JSON.stringify(body ?? {});
+    const idempotent = /^\/me\/terms\/[^/]+\/(?:enrollments(?:\/[^/]+)?|timetable\/email)$/.test(path);
+    const signature = JSON.stringify([user?.id, method, path, idempotent ? body : null]);
     if (operations.current.has(signature))
       throw new Error("此操作正在處理中。");
     operations.current.add(signature);
     setBusy(true);
-    const key = pendingKeys.current.get(signature) || crypto.randomUUID();
-    pendingKeys.current.set(signature, key);
     try {
+      let headers: Record<string, string> | undefined;
+      if (idempotent) {
+        const key = pendingKeys.current.get(signature) ?? newRequestKey();
+        pendingKeys.current.set(signature, key);
+        headers = { "Idempotency-Key": key };
+      }
       const result = await api(path, {
         method,
-        headers: { "Idempotency-Key": key },
+        headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
       pendingKeys.current.delete(signature);
       return result;
     } catch (e) {
-      if (e instanceof ApiError && e.status > 0 && e.status < 500)
+      if (e instanceof ApiError && e.status > 0 && e.status !== 408 && e.status < 500)
         pendingKeys.current.delete(signature);
       throw e;
     } finally {
@@ -478,7 +554,15 @@ export default function App() {
       setToast(message(e));
     }
   }
-  function sectionAction(s: Section) {
+  async function emailTimetable() {
+    try {
+      await mutate(`/me/terms/${termId}/timetable/email`, "POST");
+      setToast("課表已排入寄送，將寄到你的帳號信箱。");
+    } catch (e) {
+      setToast(message(e));
+    }
+  }
+  function sectionAction(s: Section, status?: "ENROLLED" | "PENDING") {
     if (!user)
       return (
         <button className="primary small" onClick={() => setLoginOpen(true)}>
@@ -486,8 +570,8 @@ export default function App() {
         </button>
       );
     if (admin) return <Badge>管理員檢視</Badge>;
-    const isEnrolled = table?.items.some((t) => t.id === s.id),
-      isPending = apps.some((a) => a.id === s.id && a.status === "PENDING");
+    const isEnrolled = status ? status === "ENROLLED" : table?.items.some((t) => t.id === s.id),
+      isPending = status ? status === "PENDING" : apps.some((a) => a.id === s.id && a.status === "PENDING");
     if (isEnrolled)
       return (
         <div className="action">
@@ -558,7 +642,7 @@ export default function App() {
       refresh();
       setToast(
         action === "apply"
-          ? "初選登記成功，目前待分發。"
+          ? "初選登記成功，目前待分發。可在我的課表查看。"
           : action === "cancel"
             ? "已取消初選登記。"
             : action === "add"
@@ -570,21 +654,27 @@ export default function App() {
     }
   }
   async function ask(text = chatInput) {
-    if (!text.trim() || chatBusy) return;
+    if (!text.trim() || chatRequest.current) return;
     if (!student) {
       setLoginOpen(true);
       return;
     }
+    const control = new AbortController();
+    chatRequest.current = control;
     setChatInput("");
     setMessages((m) => [...m, { role: "user", answer: text }]);
     setChatBusy(true);
     try {
-      const result = await api("/chat", {
+      const result = await api<ChatResponse>("/chat", {
         method: "POST",
+        signal: control.signal,
         body: JSON.stringify({ message: text, term_id: termId || undefined }),
       });
-      setMessages((m) => [...m, { role: "assistant", ...result }]);
+      if (!control.signal.aborted) {
+        setMessages((m) => [...m, { role: "assistant", ...result, prompt: text }]);
+      }
     } catch (e) {
+      if (control.signal.aborted) return;
       setMessages((m) => [
         ...m,
         {
@@ -595,9 +685,16 @@ export default function App() {
         },
       ]);
     } finally {
-      setChatBusy(false);
+      if (chatRequest.current === control) {
+        chatRequest.current = null;
+        setChatBusy(false);
+      }
     }
   }
+  const schedule = [
+    ...(table?.items ?? []).map((section) => ({ section, status: "ENROLLED" as const })),
+    ...(table?.pending_items ?? []).map((section) => ({ section, status: "PENDING" as const })),
+  ];
   const privateGate = !student ? (
     <div className="state">
       <h3>
@@ -678,26 +775,30 @@ export default function App() {
             </strong>
           </div>
           <div className="top-actions">
-            <label>
-              <span className="sr-only">選擇學期</span>
-              <select
-                aria-label="選擇學期"
-                value={termId}
-                onChange={(e) => {
-                  setTermId(e.target.value);
-                  setPage(1);
-                  setSelectedId(null);
-                }}
-              >
-                {!terms.length && <option value="">尚無學期</option>}
-                {terms.map((t) => (
-                  <option value={t.id} key={t.id}>
-                    {t.code}
-                    {!t.catalog_published_at ? "（草稿）" : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {terms.length > 1 ? (
+              <label>
+                <select
+                  aria-label="選擇學期"
+                  value={termId}
+                  onChange={(e) => {
+                    setTermId(e.target.value);
+                    setSelectedId(null);
+                  }}
+                >
+                  {terms.map((t) => (
+                    <option value={t.id} key={t.id}>
+                      {t.code}
+                      {!t.catalog_published_at ? "（草稿）" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <Badge>
+                {term?.code || (boot ? "載入學期中…" : "尚無學期")}
+                {term && !term.catalog_published_at && "（草稿）"}
+              </Badge>
+            )}
             {user ? (
               <>
                 <span className="avatar">{user.display_name.slice(0, 1)}</span>
@@ -735,7 +836,7 @@ export default function App() {
                   : view === "applications"
                     ? "追蹤初選登記，查看每一筆分發結果。"
                     : view === "timetable"
-                      ? "正式選課即時同步，一週安排一目了然。"
+                      ? "查看正式選課與待分發的上課時段。"
                       : view === "chat"
                         ? "用自然語言查詢課程、課表與選課條件。"
                         : view === "rules"
@@ -999,9 +1100,6 @@ export default function App() {
                 <div className="panel-title">
                   <div>
                     <h2>初選登記與歷史結果</h2>
-                    <p>
-                      初選錄取結果會保留；目前是否仍在課表請查看「正式選課」。
-                    </p>
                   </div>
                   <button className="small" onClick={refresh}>
                     重新整理
@@ -1012,7 +1110,7 @@ export default function App() {
                     loading={personalLoading}
                     error={personalError}
                     retry={refresh}
-                    empty={!apps.length ? "尚無初選登記紀錄" : undefined}
+                    empty={!apps.length ? "尚無初選登記或分發結果" : undefined}
                   >
                     <div className="table-wrap">
                       <table>
@@ -1051,12 +1149,12 @@ export default function App() {
                                 {table?.items.some((s) => s.id === a.id) ? (
                                   <Badge status="ENROLLED" />
                                 ) : (
-                                  <span className="muted">未列入課表</span>
+                                  <span className="muted">尚未正式選課</span>
                                 )}
                               </td>
                               <td>
                                 {a.status === "PENDING" ? (
-                                  sectionAction(a)
+                                  sectionAction(a, "PENDING")
                                 ) : (
                                   <button
                                     className="small"
@@ -1088,111 +1186,127 @@ export default function App() {
                       {table?.total_credits ?? 0}
                       <small> / {table?.credit_limit ?? 0} 學分上限</small>
                     </strong>
-                    <button className="small" onClick={refresh}>
-                      更新課表
-                    </button>
+                    <div className="action timetable-actions">
+                      <button className="small" onClick={refresh}>
+                        更新課表
+                      </button>
+                      <button
+                        className="primary small"
+                        disabled={busy || !table}
+                        onClick={emailTimetable}
+                      >
+                        寄送課表
+                      </button>
+                    </div>
                   </div>
                   <section className="panel">
                     <div className="panel-title">
                       <div>
                         <h2>每週課表</h2>
-                        <p>僅顯示目前有效的正式選課 · 臺北時間</p>
+                        <p>上課時間以臺北時間顯示</p>
                       </div>
                     </div>
                     <div className="week-wrap">
                       <div className="week">
-                        {DAYS.slice(1).map((d, i) => (
-                          <section key={d}>
-                            <h3>星期{d}</h3>
-                            {table?.items
-                              .flatMap((s) =>
-                                s.meetings
-                                  .filter((m) => m.weekday === i + 1)
-                                  .map((m, j) => ({ s, m, j })),
-                              )
-                              .sort((a, b) =>
-                                a.m.start_time.localeCompare(b.m.start_time),
-                              )
-                              .map(({ s, m, j }) => (
+                        {DAYS.slice(1).map((day, i) => {
+                          const meetings = schedule
+                            .flatMap(({ section, status }) =>
+                              section.meetings
+                                .filter((meeting) => meeting.weekday === i + 1)
+                                .map((meeting, index) => ({ section, status, meeting, index })),
+                            )
+                            .sort((a, b) => a.meeting.start_time.localeCompare(b.meeting.start_time));
+                          return (
+                            <section key={day}>
+                              <h3>星期{day}</h3>
+                              {meetings.map(({ section, status, meeting, index }) => (
                                 <button
-                                  className="class-block"
-                                  key={s.id + j}
-                                  onClick={() => setSelectedId(s.id)}
+                                  className={status === "PENDING" ? "class-block pending" : "class-block"}
+                                  key={meeting.id ?? section.id + index}
+                                  onClick={() => setSelectedId(section.id)}
                                 >
                                   <span>
-                                    {short(m.start_time)}–{short(m.end_time)}
+                                    {short(meeting.start_time)}–{short(meeting.end_time)}
                                   </span>
-                                  <strong>{s.title}</strong>
-                                  <small>{m.room}</small>
+                                  <strong>{section.title}</strong>
+                                  <small>{meeting.room}{status === "PENDING" && " · 待分發"}</small>
                                 </button>
                               ))}
-                            {!table?.items.some((s) =>
-                              s.meetings.some((m) => m.weekday === i + 1),
-                            ) && <p className="no-class">尚無課程</p>}
-                          </section>
-                        ))}
+                              {!meetings.length && <p className="no-class">尚無課程</p>}
+                            </section>
+                          );
+                        })}
                       </div>
                     </div>
                     <div className="enrolled-list">
-                      {table?.items.map((s) => (
-                        <div key={s.id}>
+                      {schedule.map(({ section, status }) => (
+                        <div key={section.id}>
                           <button
                             className="course-title"
-                            onClick={() => setSelectedId(s.id)}
+                            onClick={() => setSelectedId(section.id)}
                           >
-                            {s.code} {s.title}
+                            {section.code} {section.title}
                           </button>
-                          <span>{s.credits} 學分</span>
-                          {sectionAction(s)}
+                          <span>{section.credits} 學分</span>
+                          {sectionAction(section, status)}
                         </div>
                       ))}
                     </div>
                   </section>
                 </State>
               ))}
-            {view === "chat" && (
-              <section className="panel chat-panel">
-                <div className="panel-title">
-                  <div>
-                    <h2>✧ 選課助理</h2>
-                    <p>來源可追溯 · 個人資料只依登入身分查詢</p>
-                  </div>
-                  <Badge>唯讀查詢</Badge>
+            <section className="panel chat-panel" hidden={view !== "chat"}>
+              <div className="panel-title">
+                <div>
+                  <h2>✧ 選課助理</h2>
+                  <p>依研究方向找課並試排，確認後才送出選課。</p>
                 </div>
-                <div className="messages" aria-live="polite">
-                  {!messages.length && (
-                    <div className="chat-welcome">
-                      <span>✧</span>
-                      <h2>一起找到下一堂好課</h2>
-                      <p>試著詢問課程餘額、個人課表或選課規則。</p>
-                      <div>
-                        {[
-                          "初選登記完會立刻選上嗎？",
-                          "找星期二還有空位的電子系課",
-                          "我星期三有課嗎？",
-                        ].map((t) => (
-                          <button
-                            key={t}
-                            disabled={chatBusy}
-                            onClick={() => ask(t)}
-                          >
-                            {t}
-                          </button>
-                        ))}
-                      </div>
+              </div>
+              <div className="messages" ref={transcript} aria-label="助理對話">
+                {!messages.length && (
+                  <div className="chat-welcome">
+                    <span>✧</span>
+                    <h2>一起找到下一堂好課</h2>
+                    <p>輸入你的研究方向，或詢問課程名額與個人課表。</p>
+                    <div>
+                      {[
+                        "我的研究方向是大語言模型，請推薦並幫我選三門。",
+                        "找星期二還有空位的電子系課",
+                        "我星期三有課嗎？",
+                      ].map((t) => (
+                        <button
+                          key={t}
+                          disabled={chatBusy}
+                          onClick={() => ask(t)}
+                        >
+                          {t}
+                        </button>
+                      ))}
                     </div>
-                  )}
-                  {messages.map((m, i) => (
-                    <article key={i} className={"message " + m.role}>
-                      <small>
-                        {m.role === "user"
-                          ? "你"
-                          : m.mode === "unavailable"
-                            ? "助理暫時無法使用"
-                            : "選課助理"}
-                      </small>
-                      <p>{m.answer}</p>
-                      {m.as_of && <small>查詢時間 {dateTime(m.as_of)}</small>}
+                  </div>
+                )}
+                {messages.map((m, i) => (
+                  <article key={i} className={`message ${m.role}${m.recommendation ? " has-recommendation" : ""}`}>
+                    <small>
+                      {m.role === "user"
+                        ? "你"
+                        : m.mode === "unavailable"
+                          ? "助理暫時無法使用"
+                          : "選課助理"}
+                    </small>
+                    <p aria-live={m.role === "assistant" ? "polite" : undefined}>{m.answer}</p>
+                    {m.as_of && <small>查詢時間 {dateTime(m.as_of)}</small>}
+                    {m.recommendation ? (
+                      <RecommendationCard
+                        recommendation={m.recommendation}
+                        currentRegistration={reg}
+                        onOpenSection={setSelectedId}
+                        onConfirmed={refresh}
+                        onViewResult={(phase) => navigate(phase === "INITIAL" ? "applications" : "timetable")}
+                        onUpdate={() => m.prompt && ask(m.prompt)}
+                        updating={chatBusy}
+                      />
+                    ) : (
                       <div className="sources">
                         {m.sources?.map((s, j) => (
                           <button
@@ -1204,48 +1318,48 @@ export default function App() {
                           </button>
                         ))}
                       </div>
-                    </article>
-                  ))}
-                  {chatBusy && (
-                    <div className="message" role="status">
-                      <span className="spinner" /> 正在查詢資料…
-                    </div>
-                  )}
-                </div>
-                <form
-                  className="chat-form"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    ask();
-                  }}
+                    )}
+                  </article>
+                ))}
+                {chatBusy && (
+                  <div className="message" role="status">
+                    <span className="spinner" /> 正在查詢資料…
+                  </div>
+                )}
+              </div>
+              <form
+                className="chat-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  ask();
+                }}
+              >
+                <label className="sr-only" htmlFor="question">
+                  輸入選課問題
+                </label>
+                <textarea
+                  id="question"
+                  value={chatInput}
+                  maxLength={1000}
+                  rows={2}
+                  placeholder="輸入你的選課問題…"
+                  onChange={(e) => setChatInput(e.target.value)}
+                />
+                <button
+                  className="primary"
+                  disabled={chatBusy || !chatInput.trim()}
                 >
-                  <label className="sr-only" htmlFor="question">
-                    輸入選課問題
-                  </label>
-                  <textarea
-                    id="question"
-                    value={chatInput}
-                    maxLength={1000}
-                    rows={2}
-                    placeholder="輸入你的選課問題…"
-                    onChange={(e) => setChatInput(e.target.value)}
-                  />
-                  <button
-                    className="primary"
-                    disabled={chatBusy || !chatInput.trim()}
-                  >
-                    {chatBusy ? "查詢中" : "送出"}
-                  </button>
-                </form>
-                <p className="chat-note">
-                  {chatInput.length}/1000 字 ·
-                  助理提供查詢，正式加退選由你確認後提交。
-                </p>
-              </section>
-            )}
+                  {chatBusy ? "查詢中" : "送出"}
+                </button>
+              </form>
+              <p className="chat-note">
+                {chatInput.length}/1000 字 ·
+                初選登記須待分發。即時加選以提交結果為準。
+              </p>
+            </section>
             {view === "rules" && (
               <section className="panel rules">
-                <p className="eyebrow">SRS 1.0 · 選課規則</p>
+                <p className="eyebrow">SRS 2.0 · 選課規則</p>
                 <h2>從登記，到正式選課</h2>
                 <div className="rule-grid">
                   {[
@@ -1363,7 +1477,7 @@ export default function App() {
           </form>
         </Modal>
       )}
-      {selectedId && (
+      {selectedId && termId && (
         <Modal
           title={detail ? `${detail.title} · ${detail.section_no}` : "班別詳情"}
           onClose={() => setSelectedId(null)}
@@ -1412,20 +1526,10 @@ export default function App() {
                   </p>
                   {student && (
                     <button
-                      disabled={busy}
-                      onClick={async () => {
-                        try {
-                          setCheck(
-                            await api(
-                              `/me/terms/${termId}/sections/${detail.id}/eligibility`,
-                            ),
-                          );
-                        } catch (e) {
-                          setToast(message(e));
-                        }
-                      }}
+                      disabled={busy || checking}
+                      onClick={() => checkEligibility(detail.id)}
                     >
-                      檢查目前選課條件
+                      {checking ? "檢查中…" : "檢查目前選課條件"}
                     </button>
                   )}
                   {check && (
@@ -1469,7 +1573,7 @@ export default function App() {
             <Meetings items={confirmation.section.meetings} />
             <p>
               {confirmation.action === "apply"
-                ? "登記後為待分發，並非正式選上。"
+                ? "登記後會在課表顯示「待分發」。"
                 : confirmation.action === "drop"
                   ? "成功退選後即釋出名額。再次加選須依當時資格與剩餘名額重新審核。"
                   : confirmation.action === "add"
@@ -1867,7 +1971,7 @@ function Admin({
             <div className="panel-title">
               <div>
                 <h2>Email 通知狀態</h2>
-                <p>最近 100 筆事件；寄信失敗不影響已提交的選課結果。</p>
+                <p>最近 100 筆寄送紀錄</p>
               </div>
               <button className="small" onClick={onRefresh}>
                 更新狀態
@@ -1890,13 +1994,15 @@ function Admin({
                       <td>
                         {{
                           ALLOCATION: "分發摘要",
+                          TIMETABLE: "課表寄送",
+                          INITIAL_RECEIPT: "初選登記確認",
                           ENROLLED: "加選成功",
                           DROPPED: "退選成功",
                         }[n.type as string] || n.type}
                         <small>{n.id.slice(0, 8)}</small>
                       </td>
                       <td>
-                        <Badge status={n.status} />
+                        <Badge status={n.status}>{n.status === "PENDING" ? "等待寄送" : undefined}</Badge>
                       </td>
                       <td>{n.attempt_count} / 3</td>
                       <td>{dateTime(n.sent_at || n.next_attempt_at)}</td>

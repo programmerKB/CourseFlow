@@ -1,6 +1,6 @@
 """Immutable initial PostgreSQL schema, indexes, catalog views and access grants."""
 from pathlib import Path
-from alembic import op
+from alembic import context, op
 revision = '0001'
 down_revision = None
 branch_labels = None
@@ -8,7 +8,11 @@ depends_on = None
 
 
 def upgrade():
-    op.get_bind().exec_driver_sql(Path(__file__).with_name('0001_schema.sql').read_text())
+    schema = Path(__file__).with_name('0001_schema.sql').read_text()
+    if context.is_offline_mode():
+        op.execute(schema.rstrip().removesuffix(';'))
+    else:
+        op.get_bind().exec_driver_sql(schema)
 
 
 def downgrade():

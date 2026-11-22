@@ -1,16 +1,13 @@
+Running 9 tests using 1 worker
 
-> course-registration@1.0.0 test:e2e
-> playwright test
+  ✓  1 tests/e2e.spec.ts:10:1 › 訪客查課、學生加退選、課表、初選登記與助理 (6.7s)
+  ✓  2 tests/e2e.spec.ts:111:1 › 管理員可瀏覽分發與通知並調整容量 (1.3s)
+  ✓  3 tests/e2e.spec.ts:128:1 › 手機介面可操作且主頁無水平溢出 (564ms)
+  ✓  4 tests/selection-plans.spec.ts:23:3 › 研究推薦 ADD_DROP 可刪減並確認兩門 (1.5s)
+  ✓  5 tests/selection-plans.spec.ts:23:3 › 研究推薦 INITIAL 可刪減並確認兩門 (1.5s)
+  ✓  6 tests/selection-plans.spec.ts:70:1 › 更換學生時，上一個學生的助理請求不會寫回對話 (1.3s)
+  ✓  7 tests/selection-plans.spec.ts:100:1 › 切換班別後，舊班別的資格結果不會顯示在新詳情 (1.1s)
+  ✓  8 tests/single-term.spec.ts:7:1 › 單一公開學期會捨棄舊學期連結，且初選時段有日期與時間分隔 (420ms)
+  ✓  9 tests/single-term.spec.ts:50:1 › 代理誤回 HTML 時顯示錯誤而不會把頁面當成學期資料 (354ms)
 
-
-Running 3 tests using 1 worker
-
-(node:35098) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
-(Use `node --trace-warnings ...` to show where the warning was created)
-(node:35098) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
-(Use `node --trace-warnings ...` to show where the warning was created)
-  ✓  1 tests/e2e.spec.ts:10:1 › 訪客查課、學生加退選、課表、初選登記與助理 (4.2s)
-  ✓  2 tests/e2e.spec.ts:59:1 › 管理員可瀏覽分發與通知並調整容量 (1.2s)
-  ✓  3 tests/e2e.spec.ts:70:1 › 手機介面可操作且主頁無水平溢出 (409ms)
-
-  3 passed (6.4s)
+  9 passed (16.1s)
