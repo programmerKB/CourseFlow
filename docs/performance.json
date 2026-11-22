@@ -1,0 +1,15 @@
+{
+  "date": "2026-11-21",
+  "postgresql": "PostgreSQL 16.15 (Ubuntu 16.15-1.pgdg24.04+2) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit",
+  "platform": "Linux-7.0.0-34-generic-x86_64-with-glibc2.39",
+  "cpu_count": 4,
+  "memory_kib": 3956144,
+  "sections_in_term": 1000,
+  "concurrency": 20,
+  "warmup_requests": 25,
+  "measured_requests": 200,
+  "p50_ms": 187.97,
+  "p95_ms": 269.96,
+  "max_ms": 347.5,
+  "target_p95_ms": 500
+}

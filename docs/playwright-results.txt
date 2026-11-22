@@ -1,0 +1,16 @@
+
+> course-registration@1.0.0 test:e2e
+> playwright test
+
+
+Running 3 tests using 1 worker
+
+(node:35098) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:35098) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 tests/e2e.spec.ts:10:1 › 訪客查課、學生加退選、課表、初選登記與助理 (4.2s)
+  ✓  2 tests/e2e.spec.ts:59:1 › 管理員可瀏覽分發與通知並調整容量 (1.2s)
+  ✓  3 tests/e2e.spec.ts:70:1 › 手機介面可操作且主頁無水平溢出 (409ms)
+
+  3 passed (6.4s)

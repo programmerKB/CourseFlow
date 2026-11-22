@@ -1,0 +1,6 @@
+{
+  "status": "not_run",
+  "reason": "GEMINI_API_KEY was not supplied in this session.",
+  "stub_graph_tests": "passed",
+  "real_verification_command": "docker compose exec api python -m app.verify_gemini"
+}
