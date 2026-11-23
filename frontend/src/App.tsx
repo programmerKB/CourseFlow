@@ -25,9 +25,13 @@ import {
   type Source,
   type Meeting,
   type ChatResponse,
+  type Department,
+  type School,
+  type Topic,
   type Eligibility,
 } from "./api";
 import RecommendationCard from "./RecommendationCard";
+import ChatVoice from "./ChatVoice";
 
 type View =
   | "courses"
@@ -37,11 +41,16 @@ type View =
   | "admin"
   | "rules";
 type Mutation = (path: string, method: string, body?: unknown) => Promise<any>;
+type TextChat = { kind: "text"; text: string; sectionId?: string; trackCode?: string; key: string; signature: string };
+type VoiceChat = { kind: "voice"; audio: Blob; key: string };
+type ChatAttempt = TextChat | VoiceChat;
 type ChatMessage = Partial<ChatResponse> & {
   role: "user" | "assistant";
   answer: string;
   prompt?: string;
+  retry?: ChatAttempt;
 };
+const EMPTY_FILTERS = { q: "", school_code: "", department_id: "", topic_code: "", instructor: "", weekday: "" };
 const NAV: { id: View; label: string; icon: string }[] = [
   { id: "courses", label: "課程查詢", icon: "▦" },
   { id: "applications", label: "我的選課", icon: "☷" },
@@ -221,17 +230,12 @@ export default function App() {
     [login, setLogin] = useState("student01"),
     [password, setPassword] = useState(""),
     [loginError, setLoginError] = useState("");
-  const [filters, setFilters] = useState({
-      q: "",
-      department_id: "",
-      instructor: "",
-      weekday: "",
-    }),
+  const [filters, setFilters] = useState(EMPTY_FILTERS),
     [debounced, setDebounced] = useState(filters),
     [page, setPage] = useState(1),
-    [departments, setDepartments] = useState<{ id: string; name: string }[]>(
-      [],
-    );
+    [departments, setDepartments] = useState<Department[]>([]),
+    [schools, setSchools] = useState<School[]>([]),
+    [topics, setTopics] = useState<Topic[]>([]);
   const [catalog, setCatalog] = useState<Page | null>(null),
     [loading, setLoading] = useState(false),
     [error, setError] = useState("");
@@ -254,6 +258,7 @@ export default function App() {
     [chatBusy, setChatBusy] = useState(false),
     [messages, setMessages] = useState<ChatMessage[]>([]);
   const chatRequest = useRef<AbortController | null>(null);
+  const chatKeys = useRef(new Map<string, string>());
   const eligibilityRequest = useRef<AbortController | null>(null);
   const transcript = useRef<HTMLDivElement>(null);
   const pendingKeys = useRef(new Map<string, string>()),
@@ -327,8 +332,14 @@ export default function App() {
         });
         if (!active) return;
         setUser(who);
-        await loadTerms(who);
-        setDepartments(await api("/departments"));
+        const [, departments, schools, topics] = await Promise.all([
+          loadTerms(who), api<Department[]>("/departments"), api<School[]>("/schools"), api<Topic[]>("/topics"),
+        ]);
+        if (active) {
+          setDepartments(departments);
+          setSchools(schools);
+          setTopics(topics);
+        }
       } catch (e) {
         if (active) setBaseError(message(e));
       } finally {
@@ -363,8 +374,10 @@ export default function App() {
     return () => {
       chatRequest.current?.abort();
       chatRequest.current = null;
+      chatKeys.current.clear();
     };
   }, [termId, user?.id]);
+  useEffect(() => () => window.speechSynthesis?.cancel(), [view, termId, user?.id]);
   useEffect(() => {
     const list = transcript.current;
     if (!list || !list.lastElementChild) return;
@@ -653,35 +666,69 @@ export default function App() {
       setToast(message(e));
     }
   }
-  async function ask(text = chatInput) {
-    if (!text.trim() || chatRequest.current) return;
+  function ask(text = chatInput, sectionId?: string, trackCode?: string) {
+    text = text.trim();
+    if (!text || chatRequest.current) return;
+    const lastRoadmap = messages.slice().reverse().find((m) => m.recommendation?.roadmap)?.recommendation?.roadmap;
+    const track = trackCode ?? lastRoadmap?.track_code;
+    const signature = JSON.stringify([text, sectionId, track]);
+    const key = chatKeys.current.get(signature) ?? newRequestKey();
+    void sendChat({ kind: "text", text, sectionId, trackCode: track, key, signature });
+  }
+
+  async function sendChat(attempt: ChatAttempt) {
+    if (chatRequest.current) return;
     if (!student) {
       setLoginOpen(true);
       return;
     }
     const control = new AbortController();
     chatRequest.current = control;
-    setChatInput("");
-    setMessages((m) => [...m, { role: "user", answer: text }]);
+    if (attempt.kind === "text") {
+      chatKeys.current.set(attempt.signature, attempt.key);
+      setChatInput("");
+    }
+    setMessages((m) => [
+      ...m.map((item) => item.retry?.key === attempt.key ? { ...item, retry: undefined } : item),
+      { role: "user", answer: attempt.kind === "text" ? attempt.text : "語音提問" },
+    ]);
     setChatBusy(true);
     try {
-      const result = await api<ChatResponse>("/chat", {
+      const form = new FormData();
+      if (attempt.kind === "voice") {
+        form.append("audio", attempt.audio, "recording");
+        if (termId) form.append("term_id", termId);
+      }
+      const result = await api<ChatResponse>(attempt.kind === "voice" ? "/chat/voice" : "/chat", {
         method: "POST",
         signal: control.signal,
-        body: JSON.stringify({ message: text, term_id: termId || undefined }),
+        headers: { "Idempotency-Key": attempt.key },
+        body: attempt.kind === "voice" ? form : JSON.stringify({
+          message: attempt.text, term_id: termId || undefined, section_id: attempt.sectionId, track_code: attempt.trackCode,
+        }),
       });
       if (!control.signal.aborted) {
-        setMessages((m) => [...m, { role: "assistant", ...result, prompt: text }]);
+        if (attempt.kind === "text") chatKeys.current.delete(attempt.signature);
+        setMessages((m) => [...m, { role: "assistant", ...result,
+          prompt: attempt.kind === "text" ? attempt.text : result.transcript }]);
+        if (result.action?.status === "ENROLLED") refresh();
       }
     } catch (e) {
       if (control.signal.aborted) return;
+      const details = e instanceof ApiError ? e.details : undefined;
+      const retry = e instanceof ApiError && (e.status === 0 || e.status === 408 || e.status >= 500);
+      if (attempt.kind === "text" && !retry) chatKeys.current.delete(attempt.signature);
       setMessages((m) => [
         ...m,
         {
           role: "assistant",
-          answer: message(e),
-          mode: "unavailable",
-          sources: e instanceof ApiError ? e.details?.sources : [],
+          answer: e instanceof ApiError && e.status === 413 && attempt.kind === "voice"
+            ? (e.code === "VOICE_TOO_LONG" ? e.message : "每段錄音最多 5 MiB，請重新錄音。") : message(e),
+          mode: retry ? "unavailable" : "error",
+          sources: details?.sources,
+          registration: details?.registration,
+          transcript: details?.transcript,
+          retry: retry ? attempt : undefined,
         },
       ]);
     } finally {
@@ -690,6 +737,15 @@ export default function App() {
         setChatBusy(false);
       }
     }
+  }
+  function speak(reply: ChatMessage) {
+    const text = [reply.answer, ...(reply.choices ?? []).map(
+      (item) => `${item.school_name} ${item.department_name} ${item.title} ${item.section_no} 班，剩餘 ${item.remaining} 席`,
+    )].join(" ");
+    const speech = new SpeechSynthesisUtterance(text);
+    speech.lang = "zh-TW";
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(speech);
   }
   const schedule = [
     ...(table?.items ?? []).map((section) => ({ section, status: "ENROLLED" as const })),
@@ -924,7 +980,7 @@ export default function App() {
                   <div className="panel-title">
                     <div>
                       <h2>找到適合你的課程</h2>
-                      <p>依課程名稱、教師、系所與上課星期查詢</p>
+                      <p>模擬選課 · 依學校、系所、主題和上課時段查詢</p>
                     </div>
                     <span className="muted">
                       共 {catalog?.total ?? 0} 個班別
@@ -942,6 +998,15 @@ export default function App() {
                       />
                     </label>
                     <label>
+                      <span className="sr-only">開課學校</span>
+                      <select value={filters.school_code} onChange={(e) =>
+                        setFilters({ ...filters, school_code: e.target.value, department_id: "" })
+                      }>
+                        <option value="">所有學校</option>
+                        {schools.map((school) => <option key={school.code} value={school.code}>{school.name}</option>)}
+                      </select>
+                    </label>
+                    <label>
                       <span className="sr-only">開課系所</span>
                       <select
                         value={filters.department_id}
@@ -953,11 +1018,18 @@ export default function App() {
                         }
                       >
                         <option value="">所有系所</option>
-                        {departments.map((d) => (
+                        {departments.filter((d) => !filters.school_code || d.school_code === filters.school_code).map((d) => (
                           <option value={d.id} key={d.id}>
-                            {d.name}
+                            {d.name}{!filters.school_code && d.school_name ? ` · ${d.school_name}` : ""}
                           </option>
                         ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span className="sr-only">課程主題</span>
+                      <select value={filters.topic_code} onChange={(e) => setFilters({ ...filters, topic_code: e.target.value })}>
+                        <option value="">所有主題</option>
+                        {topics.map((topic) => <option key={topic.code} value={topic.code}>{topic.label}</option>)}
                       </select>
                     </label>
                     <label>
@@ -991,14 +1063,7 @@ export default function App() {
                     <span>選課名額以成功提交的交易為準</span>
                     <button
                       className="text"
-                      onClick={() =>
-                        setFilters({
-                          q: "",
-                          department_id: "",
-                          instructor: "",
-                          weekday: "",
-                        })
-                      }
+                      onClick={() => setFilters(EMPTY_FILTERS)}
                     >
                       清除篩選
                     </button>
@@ -1040,7 +1105,7 @@ export default function App() {
                               </td>
                               <td>
                                 {s.instructor_name}
-                                <small>{s.department_name}</small>
+                                <small>{s.school_name} {s.department_name}</small>
                               </td>
                               <td>
                                 <Meetings items={s.meetings} />
@@ -1259,7 +1324,7 @@ export default function App() {
               <div className="panel-title">
                 <div>
                   <h2>✧ 選課助理</h2>
-                  <p>依研究方向找課並試排，確認後才送出選課。</p>
+                  <p>查課、規劃研究路徑或試排。加退選期間可用明確指令直接加選單門課。</p>
                 </div>
               </div>
               <div className="messages" ref={transcript} aria-label="助理對話">
@@ -1271,6 +1336,7 @@ export default function App() {
                     <div>
                       {[
                         "我的研究方向是大語言模型，請推薦並幫我選三門。",
+                        "我想做 RF，這學期先修什麼？",
                         "找星期二還有空位的電子系課",
                         "我星期三有課嗎？",
                       ].map((t) => (
@@ -1292,10 +1358,49 @@ export default function App() {
                         ? "你"
                         : m.mode === "unavailable"
                           ? "助理暫時無法使用"
-                          : "選課助理"}
+                          : m.mode === "error" ? "操作未完成" : "選課助理"}
                     </small>
+                    {m.transcript && <p className="chat-transcript">語音辨識 {m.transcript}</p>}
                     <p aria-live={m.role === "assistant" ? "polite" : undefined}>{m.answer}</p>
+                    {m.action && (
+                      <p>本學期正式選課 {m.action.total_credits} 學分 · 此班剩餘 {m.action.remaining} 席</p>
+                    )}
                     {m.as_of && <small>查詢時間 {dateTime(m.as_of)}</small>}
+                    {m.registration && (
+                      <div className="chat-registration">
+                        <strong>{PHASES[m.registration.phase]}</strong>
+                        {m.registration.periods.map((p) => (
+                          <small key={p.kind}>{p.kind === "INITIAL" ? "初選" : "加退選"} {dateTime(p.starts_at)} ～ {dateTime(p.ends_at)}</small>
+                        ))}
+                      </div>
+                    )}
+                    {m.track_choices && (
+                      <div className="sources">
+                        {m.track_choices.map((choice) => (
+                          <button key={choice.track_code} type="button" disabled={chatBusy}
+                            onClick={() => ask(choice.title, undefined, choice.track_code)}>{choice.title}</button>
+                        ))}
+                      </div>
+                    )}
+                    {!!m.choices?.length && (
+                      <ul className="chat-choices" aria-label="待選班別">
+                        {m.choices.map((choice) => (
+                          <li key={choice.section_id}>
+                            <button className="course-title" onClick={() => setSelectedId(choice.section_id)}>
+                              {choice.code} {choice.title} · {choice.section_no} 班
+                            </button>
+                            <p>{choice.school_name} {choice.department_name} · {choice.is_selectable ? `剩餘 ${choice.remaining} 席` : "未開放"}</p>
+                            <Meetings items={choice.meetings} />
+                            {m.prompt && reg?.phase === "ADD_DROP" && (
+                              <button type="button" className="small" disabled={chatBusy || !choice.is_selectable || choice.remaining <= 0}
+                                onClick={() => ask(m.prompt, choice.section_id)}>加選此班</button>
+                            )}
+                          </li>
+                        ))}
+                        {m.choice_total && m.choice_total > m.choices.length
+                          ? <li>找到 {m.choice_total} 班。可用課程查詢查看完整清單。</li> : null}
+                      </ul>
+                    )}
                     {m.recommendation ? (
                       <RecommendationCard
                         recommendation={m.recommendation}
@@ -1303,7 +1408,8 @@ export default function App() {
                         onOpenSection={setSelectedId}
                         onConfirmed={refresh}
                         onViewResult={(phase) => navigate(phase === "INITIAL" ? "applications" : "timetable")}
-                        onUpdate={() => m.prompt && ask(m.prompt)}
+                        onUpdate={() => m.prompt && ask(m.prompt, undefined, m.recommendation?.roadmap?.track_code)}
+                        onPlanRoadmap={(code) => ask("請試排這個方向的本期課程。", undefined, code)}
                         updating={chatBusy}
                       />
                     ) : (
@@ -1317,6 +1423,14 @@ export default function App() {
                             {s.title}
                           </button>
                         ))}
+                      </div>
+                    )}
+                    {m.role === "assistant" && (
+                      <div className="chat-actions">
+                        {window.speechSynthesis && typeof SpeechSynthesisUtterance !== "undefined" &&
+                          <button type="button" className="small" onClick={() => speak(m)}>朗讀回覆</button>}
+                        {m.retry && <button type="button" className="small" disabled={chatBusy}
+                          onClick={() => m.retry && void sendChat(m.retry)}>重送同一請求</button>}
                       </div>
                     )}
                   </article>
@@ -1352,6 +1466,10 @@ export default function App() {
                   {chatBusy ? "查詢中" : "送出"}
                 </button>
               </form>
+              {view === "chat" && student && (
+                <ChatVoice key={`${user?.id}-${termId}`} disabled={chatBusy}
+                  onSend={(audio) => void sendChat({ kind: "voice", audio, key: newRequestKey() })} />
+              )}
               <p className="chat-note">
                 {chatInput.length}/1000 字 ·
                 初選登記須待分發。即時加選以提交結果為準。
@@ -1359,7 +1477,7 @@ export default function App() {
             </section>
             {view === "rules" && (
               <section className="panel rules">
-                <p className="eyebrow">SRS 2.0 · 選課規則</p>
+                <p className="eyebrow">SRS 3.2 · 選課規則</p>
                 <h2>從登記，到正式選課</h2>
                 <div className="rule-grid">
                   {[
@@ -1491,9 +1609,10 @@ export default function App() {
               <>
                 <div className="detail">
                   <p className="eyebrow">
-                    {detail.code} / {detail.department_name}
+                    {detail.code} / {detail.school_name} {detail.department_name}
                   </p>
                   <div className="detail-chips">
+                    <Badge>模擬選課</Badge>
                     <Badge>{detail.instructor_name}</Badge>
                     <Badge>{detail.credits} 學分</Badge>
                     <Badge>
@@ -1516,6 +1635,8 @@ export default function App() {
                   </div>
                   <h3>課程大綱</h3>
                   <p>{detail.description}</p>
+                  {detail.source_url && <p><a href={detail.source_url} target="_blank" rel="noreferrer">校方課程來源</a></p>}
+                  {detail.topics?.length > 0 && <p>主題 {detail.topics.map((topic) => topic.label).join("、")}</p>}
                   <h3>先修條件</h3>
                   <p>
                     {detail.prerequisites.length

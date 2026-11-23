@@ -1,14 +1,16 @@
-"""Idempotent synthetic fixtures and a guarded switch from the old demo to 115-1 initial registration."""
+"""Idempotent 115-1 demo data and fixtures for isolated registration tests."""
 import argparse
 from datetime import datetime, date, time, timedelta, timezone
 from uuid import uuid5, NAMESPACE_URL
 from decimal import Decimal
 from sqlalchemy import or_, select, text
+from .catalog_data import ADDITIONAL_TOPICS, COURSE_ALIASES, COURSE_GROUPS, DEPARTMENTS, SCHOOLS, normalize_name
 from .config import settings
 from .db import SessionLocal
 from .models import (User, Department, Student, Instructor, Term, RegistrationPeriod, StudentTerm, Course,
                      Section, SectionMeeting, SectionPrerequisite, CourseCompletion, Application,
-                     Enrollment, AllocationRun, AuditEvent, NotificationOutbox, Topic, CourseTopic)
+                     Enrollment, AllocationRun, AuditEvent, NotificationOutbox, Topic, CourseTopic, School, CourseAlias)
+from .roadmap_data import TRACKS
 from .auth import hash_password
 from .registration import audit
 
@@ -24,6 +26,23 @@ def add(db, model, key, **values):
         db.add(row)
         db.flush()
     return row
+
+
+def seed_section(db, slug, code, section_no, instructor_id, capacity, meetings, *,
+                 required_codes=(), is_selectable=True):
+    term_id, course_id = uid('term/' + slug), uid('course/' + code)
+    if db.scalar(select(Section.id).where(
+        Section.term_id == term_id, Section.course_id == course_id, Section.section_no == section_no,
+    )) is not None:
+        return
+    section_id = uid(f'section/{slug}/{code}/{section_no}')
+    add(db, Section, section_id, id=section_id, term_id=term_id, course_id=course_id, section_no=section_no,
+        instructor_id=instructor_id, credits=Decimal('3.0'), capacity=capacity, is_selectable=is_selectable)
+    for index, (day, start, end, room) in enumerate(meetings):
+        db.add(SectionMeeting(id=uid(f'meeting/{section_id}/{index}'), section_id=section_id, weekday=day,
+                              start_time=time.fromisoformat(start), end_time=time.fromisoformat(end), room=room))
+    for required_code in required_codes:
+        db.add(SectionPrerequisite(section_id=section_id, required_course_id=uid('course/' + required_code)))
 
 
 def seed_recommendation(db, current, department, *, main_only=False):
@@ -75,15 +94,8 @@ def seed_recommendation(db, current, department, *, main_only=False):
                 add(db, StudentTerm, (sid, tid), student_id=sid, term_id=tid, credit_limit=Decimal('18.0'))
             section_specs += [(code, 30, day, start, end) for code, day, start, end in baseline]
         for code, capacity, day, start, end in section_specs:
-            sid = uid(f'section/{slug}/{code}/A')
-            add(db, Section, sid, id=sid, term_id=tid, course_id=uid('course/' + code), section_no='A',
-                instructor_id=uid('teacher/chen'), credits=Decimal('3.0'), capacity=capacity, is_selectable=True)
-            meeting_id = uid('meeting/' + sid + '/0')
-            add(db, SectionMeeting, meeting_id, id=meeting_id, section_id=sid, weekday=day,
-                start_time=time.fromisoformat(start), end_time=time.fromisoformat(end), room='TR-501')
-            if code == 'DEMO-501':
-                required_id = uid('course/CS201')
-                add(db, SectionPrerequisite, (sid, required_id), section_id=sid, required_course_id=required_id)
+            seed_section(db, slug, code, 'A', uid('teacher/chen'), capacity, [(day, start, end, 'TR-501')],
+                         required_codes=('CS201',) if code == 'DEMO-501' else ())
         if new_term and add_drop:
             db.add(AllocationRun(id=uid('run/' + slug), term_id=tid, algorithm_version='v1', seed='research-demo-v2',
                                  published_at=current - timedelta(days=1), accepted_count=0, rejected_count=0))
@@ -140,10 +152,84 @@ def reopen_seeded_initial(db, term_id, current):
     return True
 
 
-def seed(mode='add-drop', *, recommendation_demo=False):
+def seed_university_catalog(db, current, history, *, separate_term=False):
+    slug = 'university-catalog' if separate_term else 'main'
+    term_id = uid('term/' + slug)
+    if separate_term and db.get(Term, term_id) is None:
+        term = add(db, Term, term_id, id=term_id, code='115-6 三校電資研究所示範',
+                   start_date=date(2027, 2, 1), end_date=date(2027, 6, 30),
+                   catalog_published_at=current, allocation_seed='three-university-demo')
+        a, b, c, d = (current + timedelta(days=offset) for offset in (-7, -2, -1, 30))
+        db.add_all([
+            RegistrationPeriod(term_id=term_id, kind='INITIAL', starts_at=a, ends_at=b),
+            RegistrationPeriod(term_id=term_id, kind='ADD_DROP', starts_at=c, ends_at=d),
+            AllocationRun(id=uid('run/' + slug), term_id=term_id, algorithm_version='v1', seed=term.allocation_seed,
+                          published_at=c, accepted_count=0, rejected_count=0),
+        ])
+    db.execute(select(Term.id).where(Term.id == term_id).with_for_update()).scalar_one()
+    for code, (name, *_) in SCHOOLS.items():
+        key = uid('school/' + code)
+        add(db, School, key, id=key, code=code, name=name)
+    topic_labels = {**ADDITIONAL_TOPICS, **{code: track.title for code, track in TRACKS.items()}}
+    for code, label in topic_labels.items():
+        # Preserve an established label or ID when upgrading existing seeds.
+        if db.scalar(select(Topic.id).where(Topic.code == code)) is None:
+            key = uid('topic/' + code)
+            add(db, Topic, key, id=key, code=code, label=label)
+    topic_ids = dict(db.execute(select(Topic.code, Topic.id)).all())
+
+    offerings = []
+    for group, rows in COURSE_GROUPS.items():
+        school, _ = group.split('-')
+        department_code, name, _ = DEPARTMENTS[group]
+        school_id = uid('school/' + school)
+        department_id = db.scalar(select(Department.id).where(
+            Department.school_id == school_id, Department.code == department_code))
+        if department_id is None:
+            department_id = uid('department/' + group)
+            add(db, Department, department_id, id=department_id, school_id=school_id,
+                code=department_code, name=name)
+        teacher_id = uid('teacher/' + group)
+        add(db, Instructor, teacher_id, id=teacher_id, name=f'{group} 示範教師', department_id=department_id)
+        for number, (title, tags, url) in enumerate(rows, 1):
+            code = f'{group}-{number:03d}'
+            course_id = uid('course/' + code)
+            add(db, Course, course_id, id=course_id, code=code, title=title, department_id=department_id,
+                description=f'{title}的模擬教學班。課程主題包含' + '、'.join(topic_labels[tag] for tag in tags) + '。',
+                catalog_origin='UNIVERSITY_REFERENCE', source_url=url)
+            for tag in tags:
+                topic_id = topic_ids[tag]
+                add(db, CourseTopic, (course_id, topic_id), course_id=course_id, topic_id=topic_id)
+            for alias in {normalize_name(name) for name in (code, title, *COURSE_ALIASES.get(code, ()))}:
+                add(db, CourseAlias, (course_id, alias), course_id=course_id, normalized_alias=alias)
+
+            for section_no in (('A', 'B') if code == 'NTU-EE-001' else ('A',)):
+                offerings.append((code, section_no, teacher_id, f'{school}-DEMO-{number:02d}'))
+
+    for slot, (code, section_no, teacher_id, room) in enumerate(offerings):
+        capacity = {'NTUST-ET-001': 1, 'NTUST-ET-006': 0}.get(code, 20)
+        hour = (9, 12, 15, 18)[slot // 5 % 4]
+        seed_section(db, slug, code, section_no, teacher_id, capacity,
+                     [(slot % 5 + 1, f'{hour:02d}:00', f'{hour + 3:02d}:00', room)],
+                     required_codes=('NTUST-ET-002',) if code == 'NTU-CS-002' else ())
+
+    if separate_term:
+        for number in range(1, 21):
+            student_id = uid(f'student/student{number:02}')
+            add(db, StudentTerm, (student_id, term_id), student_id=student_id, term_id=term_id,
+                credit_limit=Decimal('3.0' if number == 20 else '18.0'))
+    student_id = uid('student/student01')
+    prerequisite = uid('course/NTUST-ET-002')
+    add(db, CourseCompletion, (student_id, prerequisite, history.id),
+        student_id=student_id, course_id=prerequisite, completed_term_id=history.id)
+    return term_id
+
+
+def seed(mode='add-drop', *, recommendation_demo=False, university_demo=False, include_demo_terms=False):
     current = datetime.now(timezone.utc)
     main_term_id = uid('term/main')
-    main_only = settings.public_initial_term_id == main_term_id
+    initial_only = settings.public_initial_term_id == main_term_id
+    main_only = initial_only or not include_demo_terms
     reopened = False
     with SessionLocal.begin() as db:
         # Serialise concurrent invocations and retain all user-created records.
@@ -177,7 +263,8 @@ def seed(mode='add-drop', *, recommendation_demo=False):
         for code, title, dep, desc in courses:
             add(db, Course, uid('course/' + code), id=uid('course/' + code), code=code, title=title, department_id=dep, description=desc)
         history = add(db, Term, uid('term/history'), id=uid('term/history'), code='114-2 歷史學期',
-                      start_date=date(2026, 2, 1), end_date=date(2026, 6, 30), allocation_seed='history')
+                      start_date=date(2026, 2, 1), end_date=date(2026, 6, 30), allocation_seed='history',
+                      archived_at=current)
         for n in range(1, 11):
             sid = uid(f'student/student{n:02}')
             for c in ('CS101', 'CS201'):
@@ -193,7 +280,8 @@ def seed(mode='add-drop', *, recommendation_demo=False):
             term = add(db, Term, tid, id=tid, code=code, start_date=date(2026, 9, 1) if slug == 'main' else date(2027, 2, 1),
                        end_date=date(2027, 1, 31) if slug == 'main' else date(2027, 6, 30),
                        catalog_published_at=current, allocation_seed='ntust-2026-fixed-seed')
-            if exists and main_only and scenario == 'initial':
+            db.execute(select(Term.id).where(Term.id == tid).with_for_update()).scalar_one()
+            if exists and initial_only and slug == 'main' and scenario == 'initial':
                 reopened = reopen_seeded_initial(db, tid, current)
             if not exists:
                 if scenario == 'short':
@@ -223,15 +311,9 @@ def seed(mode='add-drop', *, recommendation_demo=False):
                 ('EE302', 'A', 'huang', 30, [(5, '13:00', '16:00', 'EE-304')]),
                 ('CS399', 'A', 'chen', 10, [(6, '09:00', '12:00', 'TR-510')])]
             for ccode, sno, teacher, cap, meetings in sections:
-                secid = uid(f'section/{slug}/{ccode}/{sno}')
-                add(db, Section, secid, id=secid, term_id=tid, course_id=uid('course/' + ccode), section_no=sno,
-                    instructor_id=uid('teacher/' + teacher), credits=Decimal('3.0'), capacity=cap, is_selectable=ccode != 'CS399')
-                for index, (day, start, end, room) in enumerate(meetings):
-                    mid = uid(f'meeting/{secid}/{index}')
-                    add(db, SectionMeeting, mid, id=mid, section_id=secid, weekday=day, start_time=time.fromisoformat(start), end_time=time.fromisoformat(end), room=room)
-                if ccode in ('CS201', 'CS301', 'EE201'):
-                    pre = {'CS201': 'CS101', 'CS301': 'CS201', 'EE201': 'EE101'}[ccode]
-                    add(db, SectionPrerequisite, (secid, uid('course/' + pre)), section_id=secid, required_course_id=uid('course/' + pre))
+                required = {'CS201': ('CS101',), 'CS301': ('CS201',), 'EE201': ('EE101',)}.get(ccode, ())
+                seed_section(db, slug, ccode, sno, uid('teacher/' + teacher), cap, meetings,
+                             required_codes=required, is_selectable=ccode != 'CS399')
             if not exists:
                 # Both stages include one full class. CS303 always starts with exactly one seat.
                 db.add(Enrollment(id=uid(f'enrollment/{slug}/full'), student_id=uid('student/student19'), term_id=tid,
@@ -245,6 +327,8 @@ def seed(mode='add-drop', *, recommendation_demo=False):
                                            term_id=tid, course_id=uid('course/CS303'), section_id=uid(f'section/{slug}/CS303/A'), status='PENDING'))
         if recommendation_demo:
             seed_recommendation(db, current, cs, main_only=main_only)
+        if university_demo:
+            university_term_id = seed_university_catalog(db, current, history, separate_term=not main_only)
     result = {'mode': mode, 'main_term_id': main_term_id,
               'initial_term_id': main_term_id if main_only else uid('term/initial')}
     if main_only:
@@ -254,6 +338,8 @@ def seed(mode='add-drop', *, recommendation_demo=False):
     elif recommendation_demo:
         result.update(recommendation_term_id=uid('term/recommendation-add-drop'),
                       recommendation_initial_term_id=uid('term/recommendation-initial'))
+    if university_demo:
+        result['university_term_id'] = university_term_id
     return result
 
 
@@ -261,4 +347,4 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--scenario', choices=['initial', 'awaiting', 'add-drop', 'short'],
                         default='initial' if settings.public_initial_term_id == uid('term/main') else 'add-drop')
-    print(seed(parser.parse_args().scenario, recommendation_demo=True))
+    print(seed(parser.parse_args().scenario, recommendation_demo=True, university_demo=True))

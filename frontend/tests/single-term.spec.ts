@@ -17,7 +17,7 @@ test("單一公開學期會捨棄舊學期連結，且初選時段有日期與�
         catalog_published_at: "2026-11-22T11:27:00Z",
       }] });
     }
-    if (path === "/api/v1/departments") return route.fulfill({ json: [] });
+    if (["/api/v1/departments", "/api/v1/schools", "/api/v1/topics"].includes(path)) return route.fulfill({ json: [] });
     if (path === `/api/v1/terms/${mainTerm}/registration`) {
       return route.fulfill({ json: {
         phase: "INITIAL",

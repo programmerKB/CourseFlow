@@ -3,6 +3,7 @@ from uuid import uuid4
 from sqlalchemy import (Column, String, Text, Integer, Boolean, Numeric, Date, DateTime, Time,
                         ForeignKey, ForeignKeyConstraint, UniqueConstraint, CheckConstraint, Index, func, text)
 from sqlalchemy.dialects.postgresql import UUID, JSONB
+from .catalog_data import NTUST_ID
 from .db import Base
 
 
@@ -39,11 +40,20 @@ class AuthSession(Base):
     revoked_at = Column(DateTime(timezone=True))
 
 
+class School(Base):
+    __tablename__ = 'schools'
+    id = ident()
+    code = Column(String(16), unique=True, nullable=False)
+    name = Column(String(255), nullable=False)
+
+
 class Department(Base):
     __tablename__ = 'departments'
     id = ident()
-    code = Column(String(64), unique=True, nullable=False)
+    code = Column(String(64), nullable=False)
     name = Column(String(255), nullable=False)
+    school_id = ref('schools', server_default=text(f"'{NTUST_ID}'::uuid"))
+    __table_args__ = (UniqueConstraint('school_id', 'code', name='uq_department_school_code'),)
 
 
 class Student(Base):
@@ -69,6 +79,7 @@ class Term(Base):
     start_date = Column(Date, nullable=False)
     end_date = Column(Date, nullable=False)
     catalog_published_at = Column(DateTime(timezone=True))
+    archived_at = Column(DateTime(timezone=True))
     allocation_seed = Column(Text, nullable=False)
     __table_args__ = (CheckConstraint('start_date <= end_date', name='ck_term_dates'),)
 
@@ -98,6 +109,21 @@ class Course(Base):
     department_id = ref('departments')
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=False, server_default='')
+    catalog_origin = Column(String(24), nullable=False, server_default='PROJECT_DEMO')
+    source_url = Column(Text)
+    __table_args__ = (CheckConstraint("""
+        (catalog_origin = 'PROJECT_DEMO' AND source_url IS NULL)
+        OR (catalog_origin = 'UNIVERSITY_REFERENCE' AND source_url IS NOT NULL
+            AND source_url LIKE 'https://%' AND length(source_url) > 8)
+    """, name='ck_course_catalog_source'),)
+
+
+class CourseAlias(Base):
+    __tablename__ = 'course_aliases'
+    course_id = ref('courses', primary_key=True)
+    normalized_alias = Column(String(255), primary_key=True)
+    __table_args__ = (CheckConstraint("normalized_alias <> ''", name='ck_course_alias_not_empty'),
+                      Index('ix_course_alias_lookup', 'normalized_alias', 'course_id'))
 
 
 class Topic(Base):

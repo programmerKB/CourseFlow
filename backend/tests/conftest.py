@@ -34,7 +34,7 @@ def migrations():
 def fresh_db(monkeypatch):
     with engine.begin() as conn:
         conn.execute(text('TRUNCATE users, departments, terms, courses RESTART IDENTITY CASCADE'))
-    seed('add-drop')
+    seed('add-drop', include_demo_terms=True)
     with SessionLocal.begin() as db:
         for slug, kind, start, end in [('main','INITIAL',-7,-2), ('main','ADD_DROP',-1,30),
                                       ('initial','INITIAL',-1,7), ('initial','ADD_DROP',8,30)]:

@@ -1,4 +1,5 @@
 from functools import lru_cache
+import logging
 from uuid import UUID
 from pydantic import AnyHttpUrl, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,6 +26,7 @@ class Settings(BaseSettings):
     public_initial_term_id: str = ''
     session_hours: int = 24
     gemini_model: str = 'gemini-3.5-flash-lite'
+    gemini_audio_model: str = 'gemini-3.5-flash-lite'
     gemini_api_key: str = ''
     chat_stub: bool = False
     smtp_host: str = 'mailpit'
@@ -67,7 +69,13 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings():
-    return Settings()
+    try:
+        return Settings()
+    except PermissionError as error:
+        if error.filename != '.env':
+            raise
+        logging.getLogger('courses').warning('目前執行帳號無法讀取 .env，將使用程序環境變數和預設值。')
+        return Settings(_env_file=None)
 
 
 settings = get_settings()

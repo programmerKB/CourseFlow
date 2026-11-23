@@ -504,7 +504,7 @@ small {
 }
 .filters {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   padding: 0 24px;
 }
@@ -904,6 +904,79 @@ td {
 }
 .chat-form button {
   flex-shrink: 0;
+}
+.voice-controls,
+.chat-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.voice-controls {
+  margin: 12px 25px 0;
+}
+.voice-controls > small,
+.chat-transcript,
+.chat-registration small {
+  color: #645879;
+}
+.voice-controls > .error {
+  flex-basis: 100%;
+}
+.recording-dot {
+  display: inline-block;
+  width: 0.55rem;
+  aspect-ratio: 1;
+  margin-inline-end: 0.3rem;
+  border-radius: 50%;
+  background: #bc3f45;
+}
+.chat-actions {
+  margin-top: 12px;
+}
+.chat-registration {
+  display: grid;
+  margin-top: 10px;
+}
+.chat-choices,
+.roadmap-courses {
+  display: grid;
+  gap: 10px;
+  padding: 0;
+  list-style: none;
+}
+.chat-choices > li,
+.roadmap-stage {
+  border: 1px solid #e2def0;
+  border-radius: 10px;
+  background: #fff;
+  padding: 12px;
+}
+.chat-choices > li > p {
+  margin: 5px 0;
+}
+.roadmap-stages {
+  display: grid;
+  gap: 10px;
+}
+.roadmap-courses > li {
+  border-top: 1px solid #e9e4f2;
+  padding-top: 10px;
+}
+.roadmap-stage dt {
+  color: #5b4b81;
+  font-weight: 600;
+}
+.roadmap-stage dd {
+  margin: 2px 0 10px;
+}
+.roadmap-section {
+  display: grid;
+  justify-items: start;
+  margin: 8px 0;
+}
+.roadmap-section > span {
+  font-size: 0.875rem;
 }
 .chat-note {
   padding: 13px 25px 20px;

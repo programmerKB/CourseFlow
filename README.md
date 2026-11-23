@@ -1,8 +1,10 @@
 # CourseFlow 大學選課與課程推薦系統
 
-CourseFlow 提供公開查課、初選登記、分發、週課表與教務管理。學生可用自然語言查詢課程或依研究方向試排，檢查班別後一次確認。預設學生入口只公開 **115-1**，並在首次部署開啟初選。
+`v2.0.0` 對應 [需求說明書 3.2](Course_Registration_SRS.md)，加入三校電資課庫、文字與語音直接加選，以及 16 條研究修課路徑。
 
-交付版本為 `v1.0.0`。介面使用繁體中文，日期與時間採 `Asia/Taipei`，儲存庫內的種子資料為虛構資料。系統使用 React、TypeScript、FastAPI、PostgreSQL、LangGraph、Gemini 與 Docker Compose。詳見 [需求說明書 2.0](Course_Registration_SRS.md)。
+CourseFlow 提供公開查課、初選登記、分發、週課表與教務管理。學生可用自然語言查詢課程或依研究方向試排，檢查班別後一次確認。基本課程、研究推薦範例與三校課庫都在 **115-1**，首次採預設設定部署時開啟初選。
+
+介面使用繁體中文，日期與時間採 `Asia/Taipei`，儲存庫內的種子資料為虛構資料。系統使用 React、TypeScript、FastAPI、PostgreSQL、LangGraph、Gemini 與 Docker Compose。
 
 ![115-1 待分發課表與寄送課表按鈕](docs/timetable.png)
 
@@ -13,20 +15,19 @@ CourseFlow 提供公開查課、初選登記、分發、週課表與教務管理
 ### 首次部署
 
 ```bash
-git clone https://github.com/programmerKB/CourseFlow.git
+git clone --branch v2.0.0 https://github.com/programmerKB/CourseFlow.git
 cd CourseFlow
 sudo ./deploy.sh
 ```
 
-[deploy.sh](deploy.sh) 會從範本建立缺少的 `.env`，再建置映像檔、執行 migration、初始化示範資料並啟動前端與通知 Worker。健康檢查通過後會列出服務網址。要取得固定的交付版本，可在 clone 時加上 `--branch v1.0.0`。
+[deploy.sh](deploy.sh) 會從範本建立缺少的 `.env`，再建置映像檔、執行 migration、初始化示範資料並啟動前端與通知 Worker。健康檢查通過後會列出服務網址。
 
 ### 更新既有部署
 
 在既有專案目錄執行以下指令，使用原本的 `.env` 和資料庫 volume。
 
 ```bash
-git pull --ff-only origin main
-sudo ./deploy.sh --skip-seed
+sudo ./deploy.sh
 ```
 
 ```bash
@@ -36,7 +37,9 @@ sudo ./deploy.sh --env-file .env.production --timeout 300
 sudo ./deploy.sh --help
 ```
 
-首次沿用預設設定部署時，115-1 的初選開放至初始化後第 7 天。種子程式可將舊版沒有實際分發的示範紀錄轉為初選，正式登記、選課及其他學期的資料均保留。已使用多學期模式的環境，可將 `.env` 的 `PUBLIC_INITIAL_TERM_ID` 設成範本中的 115-1 ID，部署後學生入口只列出該學期。
+升級會把舊展示學期的班別補入 115-1，包含時段、名額與先修條件。已在 115-1 開設的同課同班以原資料為準。舊展示學期會歸檔，原學期的登記、選課與先修紀錄留在資料庫。部署腳本會補齊尚未初始化的三校課程。
+
+首次沿用預設設定部署時，115-1 的初選開放至初始化後第 7 天。種子程式可將舊版沒有實際分發的示範紀錄轉為初選。
 
 腳本保留既有 `.env` 與資料庫 volume。更新時會暫停前端、API 與 Worker，migration 成功後再啟動，因此有短暫服務中斷。migration 失敗時停止後續部署並顯示失敗階段。環境檔按 Docker Compose 格式讀取。
 
@@ -95,7 +98,7 @@ COOKIE_SECURE=false
 | `student01`～`student10` | `Demo123!` | 資工系學生，已於歷史學期通過程式設計、資料結構 |
 | `student11`～`student20` | `Demo123!` | 電子系學生，包含先修未通過案例 |
 
-在基本選課示範學期，`student20` 學分上限為 3.0，其他學生為 25.0。`student19` 已選上容量 1 的軟體工程。單學期部署的 115-1 也包含研究推薦範例課程。115-4 和 115-5 是多學期模式的獨立研究推薦示範學期。
+在 115-1，`student20` 學分上限為 3.0，其他示範學生為 25.0。`student19` 已選上容量 1 的軟體工程。
 
 「我是電子系學生，給我修課建議」會依電子工程系的公開班別和登入者目前的選課紀錄試排。「我剛剛選了什麼？」會列出本學期的待分發登記及正式選課。這兩種明確問法可由資料庫直接回答。
 
@@ -110,20 +113,20 @@ COOKIE_SECURE=false
 | EE201 A 電子學 | 先修 EE101 |
 | CS399 A 人工智慧專題 | 公開可查，但未開放選課 |
 
-Seed 使用固定 UUID5。重跑會補上缺少的資料並保留選課、分發與稽核。單學期模式首次轉換舊版種子資料時會重設初選窗口，之後重跑會沿用該時段。多學期模式的 `--scenario` 僅用於第一次建立主示範學期。
+Seed 使用固定 UUID5。重跑會補上缺少的班別並保留現有班別、選課、分發與稽核。`--scenario` 用於第一次建立 115-1 的選課時段。
 
 ## 初始化情境與展示流程
 
-以下是多學期展示情境。先在 `.env` 設定 `PUBLIC_INITIAL_TERM_ID=` 並重建 API，再於新建的示範環境選擇第一個 seed 指令：
+下列情境都使用 115-1。若要展示即時加退選，先在示範環境的 `.env` 設定 `PUBLIC_INITIAL_TERM_ID=`，再選擇首次部署的啟動方式。
 
 ```bash
-docker compose exec api python -m app.seed --scenario initial
-docker compose exec api python -m app.seed --scenario awaiting
-docker compose exec api python -m app.seed --scenario add-drop
-docker compose exec api python -m app.seed --scenario short
+sudo ./deploy.sh --scenario initial
+sudo ./deploy.sh --scenario awaiting
+sudo ./deploy.sh --scenario add-drop
+sudo ./deploy.sh --scenario short
 ```
 
-四個指令是不同選項，只需選一個。`initial` 為初選開放；`awaiting` 為已截止待分發，預先登記兩人競爭最後一席；`add-drop` 為已公布、加退選開放；`short` 則在 seed 後約 3 分鐘截止初選，接著進入約 27 分鐘的加退選時窗。短窗口仍須由管理員執行分發才能加退選。所有情境另有初選示範學期；初選及短窗口情境另附加退選練習學期。
+四個指令是不同選項，只需選一個。`initial` 開放初選。`awaiting` 為初選已截止、等待分發，預先登記兩人競爭最後一席。`add-drop` 開放即時加退選。`short` 在初始化後約 3 分鐘截止初選，接著由管理員公布分發，再開放加退選。
 
 建議展示：
 
@@ -136,13 +139,29 @@ docker compose exec api python -m app.seed --scenario short
 
 ### 研究方向推薦與批次選課
 
-1. 以 `student01` 登入，選擇 **115-4 研究方向推薦示範**。首次 seed 時，已有 9 學分、上限 18 學分。
+1. 以 `student01` 登入 **115-1**。
 2. 打開選課助理，輸入「我的研究方向是大語言模型，請推薦並幫我選三門。」或點選同一個範例。`LLM` 與「大語言模型」使用同一組主題與排序規則。
-3. 試排納入 `DEMO-501`、`DEMO-502`、`DEMO-503`，預估 18 學分。`DEMO-504` 顯示衝堂，`DEMO-505` 顯示額滿。展開推薦可核對大綱、先修、全部時段與研究延伸。
-4. 取消勾選一門後，預估改為 15 學分。按「確認加選」，兩班一次提交並更新正式課表。若名額或課表已變動，找出畫面標示的班別後按「更新試排」。
-5. 改用 **115-5 研究方向初選示範**，相同流程會送出初選登記，結果顯示「待分發」。初選截止後由管理員照原流程公布。
+3. 推薦可涵蓋三校課程和 `DEMO-501` 至 `DEMO-505`。展開推薦可核對大綱、先修、全部時段與研究延伸。
+4. 在初選期間按「確認初選登記」，查看待分發結果。加退選期間按「確認加選」，更新正式課表。若名額或課表已變動，可按「更新試排」。
 
-兩個研究示範學期對應多學期模式。`0002` migration 建立推薦與試排資料表，seed 補入示範課程。測試時可使用 `CHAT_STUB=true`，讓固定意圖走同一條推薦與選課流程。實際 Gemini 驗收需設定金鑰與 `CHAT_STUB=false`。
+測試時可使用 `CHAT_STUB=true`，讓固定意圖走同一條推薦與選課流程。實際 Gemini 驗收需設定金鑰與 `CHAT_STUB=false`。
+
+### V2 三校課庫與單門加選
+
+執行 `sudo ./deploy.sh` 後，可直接在 **115-1** 查詢 40 門三校參考課程及 41 個三校模擬班別。校別篩選可分別查看臺大、臺師大與臺科大。
+
+1. 在課程查詢選擇「國立臺灣科技大學」、「電子工程系」與「計算機結構與記憶體系統」。班別詳情附「校方課程來源」。上課時段、名額、學分及教師是專題資料。
+2. 在即時加退選期間，以學生帳號開啟選課助理，輸入「我要加選臺科大電子系的高等計算機結構」或「我要加選 NTUST-ET-001」。找到唯一班別且資格符合時，當次送出就會更新「我的課表」。
+3. 省略校系時會列出同名課的候選班別，可點「加選此班」。初選階段可由錯誤訊息開啟班別進行初選登記。
+4. 輸入「我想做 RF，這學期先修什麼？」查看基礎、進階和研究專題。可接著按「試排本期課程」，再確認要提交的班別。「IC 設計」和「NVM」會先請你選方向。
+
+### 語音輸入與朗讀
+
+使用 HTTPS 或本機的 `http://localhost:8080`。Chrome 等支援錄音的瀏覽器會請求麥克風權限。點「開始錄音」，說出問題或明確加選指令，再按「停止並送出」。20 秒到期時停止收音，畫面會等待送出或取消。助理會顯示轉寫文字，支援朗讀的瀏覽器可按「朗讀回覆」。
+
+區網語音可在前端服務前使用 HTTPS 反向代理，將 `APP_ORIGIN` 設為實際的 HTTPS 來源，並設定 `COOKIE_SECURE=true`。區網 HTTP 可使用文字助理。
+
+送出的錄音由後端轉成單聲道 WAV 並傳給 `GEMINI_AUDIO_MODEL` 轉寫。Compose 映像已安裝 FFmpeg。本機啟動須另安裝 FFmpeg 並讓 `ffmpeg` 可從 PATH 執行。文字直接加選、已知研究路徑與本人選課查詢可在 Gemini 暫時無法使用時繼續操作。語音與文字模型分別依設定啟用。[Gemini 音訊輸入](https://ai.google.dev/gemini-api/docs/audio) · [預設模型支援格式](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite)
 
 ## Email 設定與 SMTP 錯誤排查
 
@@ -203,6 +222,7 @@ sudo nano .env
 
 ```ini
 GEMINI_MODEL=gemini-3.5-flash-lite
+GEMINI_AUDIO_MODEL=gemini-3.5-flash-lite
 GEMINI_API_KEY=貼上你在Google_AI_Studio建立的Gemini_API金鑰
 CHAT_STUB=false
 ```
@@ -219,12 +239,12 @@ sudo docker compose restart frontend
 確認容器是否已載入設定（只顯示是否存在金鑰，不顯示內容），再以學生帳號登入測試，例如 `student01`：
 
 ```bash
-sudo docker compose exec api python -c 'import os; print({"GEMINI_MODEL": os.getenv("GEMINI_MODEL"), "CHAT_STUB": os.getenv("CHAT_STUB"), "GEMINI_API_KEY_SET": bool(os.getenv("GEMINI_API_KEY", "").strip())})'
+sudo docker compose exec api python -c 'import os; print({"GEMINI_MODEL": os.getenv("GEMINI_MODEL"), "GEMINI_AUDIO_MODEL": os.getenv("GEMINI_AUDIO_MODEL"), "CHAT_STUB": os.getenv("CHAT_STUB"), "GEMINI_API_KEY_SET": bool(os.getenv("GEMINI_API_KEY", "").strip())})'
 ```
 
 預期看到 `GEMINI_API_KEY_SET: True`、`CHAT_STUB: 'false'` 及指定的模型名稱。這只確認設定載入，實際呼叫仍取決於金鑰權限、模型可用性、網路與專案額度。
 
-以下指令用真實 Gemini 測試查課與研究推薦，並比對 PostgreSQL 中的公開班別。預設單學期模式會在 115-1 執行兩項驗收。多學期模式則會使用 115-1 查課及 115-4 驗證研究方向推薦。
+以下指令用真實 Gemini 測試 115-1 查課與研究推薦，並比對 PostgreSQL 中的公開班別。
 
 ```bash
 sudo docker compose exec api python -m app.verify_gemini
@@ -291,7 +311,7 @@ PUBLIC_DATABASE_URL=postgresql+psycopg://course_public:course_public@127.0.0.1:5
 .venv/bin/python backend/run_tests.py
 ```
 
-瀏覽器測試會進行加退選、初選登記、課表寄送和容量維護。請使用獨立示範資料庫，設定 `PUBLIC_INITIAL_TERM_ID=`、`CHAT_STUB=true` 並將 SMTP 指向 Mailpit，再啟動前後端。
+跨學期的瀏覽器回歸會進行加退選、初選登記、課表寄送和容量維護。請使用獨立測試資料庫，以 `seed('add-drop', recommendation_demo=True, university_demo=True, include_demo_terms=True)` 建立測試情境，設定 `PUBLIC_INITIAL_TERM_ID=`、`CHAT_STUB=true` 並將 SMTP 指向 Mailpit，再啟動前後端。
 
 ```bash
 cd frontend
@@ -300,7 +320,7 @@ npx playwright install chromium
 E2E_BASE_URL=http://localhost:5173 npm run test:e2e
 ```
 
-如測試 Compose 前端，改為 `E2E_BASE_URL=http://localhost:8080`。前端建置為 `npm run build`（含 TypeScript 型別檢查）。本次[驗證報告](docs/verification.md)記錄實測結果與限制。
+如測試 Compose 前端，改為 `E2E_BASE_URL=http://localhost:8080`。前端建置為 `npm run build`（含 TypeScript 型別檢查）。實測結果與限制請參閱 [V2 驗證報告](docs/verification-v2.md)。
 
 ## 本機開發（Linux、不依賴 Docker daemon）
 
@@ -313,9 +333,11 @@ E2E_BASE_URL=http://localhost:5173 npm run test:e2e
 
 本機入口為 http://localhost:5173 與 http://localhost:8000/docs；資料庫使用 loopback 55432，資料存於 `.runtime/pgdata`。本機資料庫是展示用 trust 認證，僅監聽 `127.0.0.1`；Compose 則使用各用途的密碼角色。Ctrl+C 停止腳本啟動的應用程序，PostgreSQL 資料保留。
 
-若有 Mailpit 可執行檔，可將它放在 `.runtime/mailpit`，腳本會啟動 SMTP 1025 與 Web 8025。SMTP 暫時無法使用時，郵件依 Outbox 規則重試。
+若有 Mailpit 可執行檔，可將它放在 `.runtime/mailpit`，腳本會啟動 SMTP 1025 與 Web 8025。本機腳本使用 Mailpit 的無帳密設定。SMTP 暫時無法使用時，郵件依 Outbox 規則重試。
 
-真實金鑰可放入專案根目錄的 `.env`；沒有金鑰時助理正常回報不可用。測試 stub 可用 `CHAT_STUB=true ./scripts/run-local.sh` 啟動，完成測試後以預設設定重啟。
+真實金鑰可放入專案根目錄的 `.env`。測試用文字分類可用 `CHAT_STUB=true ./scripts/run-local.sh`。語音端點使用 Gemini 轉寫，整合測試會模擬這個回應。
+
+若目前帳號無法讀取 `.env`，本機程序會改用環境變數及預設值。Compose 仍由執行部署的帳號讀取自己的環境檔。
 
 ## API 與專案結構
 
@@ -323,7 +345,9 @@ E2E_BASE_URL=http://localhost:5173 npm run test:e2e
 
 | API | 用途 |
 |---|---|
-| `POST /api/v1/chat` | 傳送 `message` 與選定的 `term_id`。推薦模式會回傳候選、研究延伸、資格與可用草案。 |
+| `GET /api/v1/schools`、`GET /api/v1/topics` | 提供公開查課的校系與主題選項。班別列表接受 `school_code` 和 `topic_code`。 |
+| `POST /api/v1/chat` | 傳送 `message` 與 `term_id`。直接加選帶 `Idempotency-Key`。從候選選班時附原指令與 `section_id`。已選定研究方向後可用 `track_code` 接續試排。 |
+| `POST /api/v1/chat/voice` | 以 `multipart/form-data` 傳送 `audio`、`term_id` 並附 `Idempotency-Key`。回傳轉寫及與文字助理相同的結果。 |
 | `POST /api/v1/me/terms/{term_id}/selection-plans/{plan_id}/confirm` | 只接受本人草案中的 1–5 班。`section_ids` 是確定送出的班別集合。任一班失敗時整批回滾，回應以 `details.section_id` 指出班別。 |
 | `POST /api/v1/me/terms/{term_id}/timetable/email` | 將當下課表排入本人信箱的寄送佇列。`201` 回傳 `notification_id`。 |
 
@@ -346,4 +370,4 @@ compose.yaml               db / migrate / api / frontend / worker / mailpit
 
 [架構、核心 ERD 與交易設計](docs/architecture.md)、[SQL 與 EXPLAIN ANALYZE BUFFERS](docs/explain.txt)、[效能數據](docs/performance.json)、[課程查詢畫面](docs/desktop.png)、[手機畫面](docs/mobile.png)。
 
-本版通過 120 項後端 PostgreSQL 測試、9 項瀏覽器測試、8 項部署腳本測試及前端建置。課表信件用本機 Mailpit 驗證收件與重新投遞。完整驗證範圍及待驗項目見 [驗證報告](docs/verification.md)。
+本版的需求對照、測試結果及部署驗收項目見 [V2 驗證報告](docs/verification-v2.md)。[v1.0.0 驗證紀錄](docs/verification.md) 保留原交付結果。
