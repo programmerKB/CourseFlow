@@ -9,7 +9,8 @@ fi
 export DATABASE_URL=postgresql+psycopg://course_app:course_app@127.0.0.1:55432/courses
 export PUBLIC_DATABASE_URL=postgresql+psycopg://course_public:course_public@127.0.0.1:55432/courses
 export APP_ORIGIN=http://localhost:5173
-export SMTP_HOST=127.0.0.1 SMTP_PORT=1025
+# Keep the local Mailpit settings together when .env contains Gmail credentials.
+export SMTP_HOST=127.0.0.1 SMTP_PORT=1025 SMTP_STARTTLS=false SMTP_USER= SMTP_PASSWORD=
 export PYTHONPATH="$project_dir/backend"
 pg_bin="${PG_BIN:-$(pg_config --bindir)}"
 mkdir -p .runtime/pgsocket

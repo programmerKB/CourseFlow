@@ -14,9 +14,10 @@ from uuid import uuid4
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select, func, and_, or_, exists
 
+from .catalog_data import normalize_name
 from .config import settings
 from .errors import DomainError
-from .models import (Term, RegistrationPeriod, StudentTerm, Section, Course,
+from .models import (Term, RegistrationPeriod, StudentTerm, Section, Course, CourseAlias, CourseTopic, Topic, School,
                      Instructor, Department, SectionMeeting, SectionPrerequisite,
                      CourseCompletion, Enrollment, Application, AllocationRun,
                      AuditEvent, IdempotencyKey, NotificationOutbox, Student,
@@ -38,15 +39,19 @@ def now(db):
     return db.scalar(select(func.clock_timestamp()))
 
 
+def active_terms_query():
+    return select(Term).where(Term.archived_at.is_(None))
+
+
 def public_terms_query():
-    stmt = select(Term).where(Term.catalog_published_at.is_not(None))
+    stmt = active_terms_query().where(Term.catalog_published_at.is_not(None))
     if settings.public_initial_term_id:
         stmt = stmt.where(Term.id == settings.public_initial_term_id)
     return stmt
 
 
 def get_term(db, term_id, lock=None, public=True):
-    stmt = (public_terms_query() if public else select(Term)).where(Term.id == term_id)
+    stmt = (public_terms_query() if public else active_terms_query()).where(Term.id == term_id)
     if lock:
         stmt = stmt.with_for_update(read=(lock == 'share'))
     term = db.scalar(stmt.execution_options(populate_existing=True))
@@ -96,11 +101,14 @@ def registration_status(db, term):
 def section_rows(db, ids):
     if not ids:
         return []
-    counts = select(Enrollment.section_id, func.count().label('n')).where(Enrollment.status == 'ENROLLED').group_by(Enrollment.section_id).subquery()
-    rows = db.execute(select(Section, Course, Instructor, Department, func.coalesce(counts.c.n, 0))
+    counts = select(Enrollment.section_id, func.count().label('n')).where(
+        Enrollment.status == 'ENROLLED', Enrollment.section_id.in_(ids),
+    ).group_by(Enrollment.section_id).subquery()
+    rows = db.execute(select(Section, Course, Instructor, Department, School, func.coalesce(counts.c.n, 0))
                       .join(Course, Section.course_id == Course.id)
                       .join(Instructor, Section.instructor_id == Instructor.id)
                       .join(Department, Course.department_id == Department.id)
+                      .join(School, Department.school_id == School.id)
                       .outerjoin(counts, Section.id == counts.c.section_id).where(Section.id.in_(ids))).all()
     meetings = {}
     for m in db.scalars(select(SectionMeeting).where(SectionMeeting.section_id.in_(ids)).order_by(SectionMeeting.weekday, SectionMeeting.start_time)):
@@ -109,12 +117,19 @@ def section_rows(db, ids):
     prerequisites = {}
     for sid, c in db.execute(select(SectionPrerequisite.section_id, Course).join(Course, SectionPrerequisite.required_course_id == Course.id).where(SectionPrerequisite.section_id.in_(ids))):
         prerequisites.setdefault(sid, []).append({'id': c.id, 'code': c.code, 'title': c.title})
+    topics = {}
+    course_ids = {course.id for _, course, *_ in rows}
+    for cid, topic in db.execute(select(CourseTopic.course_id, Topic).join(Topic, CourseTopic.topic_id == Topic.id)
+                                 .where(CourseTopic.course_id.in_(course_ids)).order_by(Topic.code)):
+        topics.setdefault(cid, []).append({'code': topic.code, 'label': topic.label})
     at = now(db)
     result = {}
-    for s, c, i, d, n in rows:
+    for s, c, i, d, school, n in rows:
         result[s.id] = {'id': s.id, 'term_id': s.term_id, 'course_id': c.id, 'code': c.code, 'title': c.title,
                         'description': c.description, 'section_no': s.section_no, 'department_id': d.id,
-                        'department_name': d.name, 'instructor_id': i.id, 'instructor_name': i.name,
+                        'department_name': d.name, 'school_code': school.code, 'school_name': school.name,
+                        'catalog_origin': c.catalog_origin, 'source_url': c.source_url, 'topics': topics.get(c.id, []),
+                        'instructor_id': i.id, 'instructor_name': i.name,
                         'credits': s.credits, 'capacity': s.capacity, 'enrolled_count': n,
                         'remaining': s.capacity - n, 'is_selectable': s.is_selectable,
                         'meetings': meetings.get(s.id, []), 'prerequisites': prerequisites.get(s.id, []), 'as_of': at}
@@ -135,14 +150,24 @@ def section_dict(db, section):
     return section_rows(db, [section.id])[0]
 
 
-def list_sections(db, term_id, q=None, department_id=None, instructor=None, weekday=None, page=1, page_size=20):
+def list_sections(db, term_id, q=None, department_id=None, instructor=None, weekday=None, page=1, page_size=20,
+                  *, school_code=None, topic_code=None):
     stmt = select(Section.id).join(Course, Course.id == Section.course_id).join(Instructor, Instructor.id == Section.instructor_id).where(Section.term_id == term_id)
-    if q:
-        stmt = stmt.where(or_(Course.code.ilike(f'%{q}%'), Course.title.ilike(f'%{q}%')))
+    if q and (q := q.strip()):
+        stmt = stmt.where(or_(Course.code.icontains(q, autoescape=True), Course.title.icontains(q, autoescape=True),
+                              exists(select(CourseAlias.course_id).where(
+                                  CourseAlias.course_id == Course.id,
+                                  CourseAlias.normalized_alias == normalize_name(q)))))
     if department_id:
         stmt = stmt.where(Course.department_id == department_id)
-    if instructor:
-        stmt = stmt.where(Instructor.name.ilike(f'%{instructor}%'))
+    if instructor and (instructor := instructor.strip()):
+        stmt = stmt.where(Instructor.name.icontains(instructor, autoescape=True))
+    if school_code:
+        stmt = stmt.join(Department, Course.department_id == Department.id).join(
+            School, School.id == Department.school_id).where(School.code == school_code)
+    if topic_code:
+        stmt = stmt.where(exists(select(CourseTopic.course_id).join(Topic, Topic.id == CourseTopic.topic_id)
+                                 .where(CourseTopic.course_id == Course.id, Topic.code == topic_code)))
     if weekday:
         stmt = stmt.where(exists(select(SectionMeeting.id).where(SectionMeeting.section_id == Section.id, SectionMeeting.weekday == weekday)))
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
@@ -210,6 +235,13 @@ def load_admission_state(db, st, term, *, include_pending=True):
 def baseline_credits(baseline, phase):
     rows = baseline.enrolled + (baseline.pending if phase == 'INITIAL' else [])
     return sum({row['id']: row['credits'] for row in rows}.values(), Decimal('0.0'))
+
+
+def within_availability(meetings, availability):
+    return not availability or all(any(
+        meeting['weekday'] == slot.weekday and slot.start_time <= meeting['start_time'] and meeting['end_time'] <= slot.end_time
+        for slot in availability
+    ) for meeting in meetings)
 
 
 def evaluate_admission(term_id, section, baseline, phase, planned=(), *, keep_existing_pending=False):
@@ -388,11 +420,36 @@ def queue_timetable_email(db, student_id, term_id, user_id, request_key):
     return 201, body
 
 
-def audit_enrollment(db, actor_user_id, enrollment, action, plan_id=None):
+def audit_enrollment(db, actor_user_id, enrollment, action, plan_id=None, *, channel=None):
     payload = {'section_id': enrollment.section_id, 'source': 'ADD_DROP'}
     if plan_id:
         payload['plan_id'] = plan_id
+    if channel:
+        payload['channel'] = channel
     audit(db, actor_user_id, enrollment.term_id, action, 'enrollment', enrollment.id, payload)
+
+
+def lock_add_drop_section(db, term, section_id):
+    section = get_section(db, term.id, section_id, True)
+    registration = registration_status(db, term)
+    if registration['phase'] != 'ADD_DROP':
+        raise DomainError(409, 'REGISTRATION_CLOSED', REASONS['REGISTRATION_CLOSED'],
+                          {'registration': registration, 'section_id': section_id})
+    return section
+
+
+def add_enrollment(db, term, st, section_id, actor_user_id, *, channel=None):
+    section = lock_add_drop_section(db, term, section_id)
+    code, details = admission_error(db, st, term, section)
+    if code:
+        raise DomainError(409, code, REASONS[code], details)
+    enrollment = enroll(db, st.student_id, term.id, section, 'ADD_DROP')
+    audit_enrollment(db, actor_user_id, enrollment, 'ENROLLED', channel=channel)
+    total_credits = db.scalar(select(func.coalesce(func.sum(Section.credits), Decimal('0.0')))
+        .join(Enrollment, Enrollment.section_id == Section.id).where(
+            Enrollment.student_id == st.student_id, Enrollment.term_id == term.id,
+            Enrollment.status == 'ENROLLED'))
+    return enrollment, section_dict(db, section), total_credits
 
 
 def enrollment_change(db, student_id, term_id, section_id, actor_user_id, request_key, method, path):
@@ -402,29 +459,22 @@ def enrollment_change(db, student_id, term_id, section_id, actor_user_id, reques
     replay = replay_response(db, student_id, term_id, request_key, fingerprint)
     if replay is not None:
         return replay
-    section = get_section(db, term_id, section_id, True)
-    if phase(db, term) != 'ADD_DROP':
-        raise DomainError(409, 'REGISTRATION_CLOSED', REASONS['REGISTRATION_CLOSED'])
     if method == 'POST':
-        code, details = admission_error(db, st, term, section)
-        if code:
-            raise DomainError(409, code, REASONS[code], details)
-        e = enroll(db, student_id, term_id, section, 'ADD_DROP')
+        e, details, total_credits = add_enrollment(db, term, st, section_id, actor_user_id)
         status = 201
-        action = 'ENROLLED'
+        body = jsonable_encoder({'enrollment': {'id': e.id, 'section_id': section_id, 'status': e.status, 'source': e.source},
+                                  'remaining': details['remaining'], 'total_credits': total_credits,
+                                  'as_of': now(db)})
     else:
+        lock_add_drop_section(db, term, section_id)
         e = db.scalar(select(Enrollment).where(Enrollment.student_id == student_id, Enrollment.term_id == term_id,
                                               Enrollment.section_id == section_id, Enrollment.status == 'ENROLLED'))
         if not e:
             raise DomainError(404, 'ENROLLMENT_NOT_FOUND', '找不到此班別的有效選課。')
         e.status, e.updated_at = 'DROPPED', now(db)
         db.flush()
-        status, action = 204, 'DROPPED'
-    details = section_dict(db, section)
-    audit_enrollment(db, actor_user_id, e, action)
-    body = jsonable_encoder({'enrollment': {'id': e.id, 'section_id': section_id, 'status': e.status, 'source': e.source},
-                              'remaining': details['remaining'], 'total_credits': get_timetable(db, student_id, term_id)['total_credits'],
-                              'as_of': now(db)}) if status == 201 else None
+        status, body = 204, None
+        audit_enrollment(db, actor_user_id, e, 'DROPPED')
     record_response(db, student_id, term_id, request_key, fingerprint, status, body)
     db.flush()
     return status, body

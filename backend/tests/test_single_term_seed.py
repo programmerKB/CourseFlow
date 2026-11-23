@@ -3,12 +3,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select, text
 
-from app import registration as reg
+from app import chat, registration as reg
 from app.config import settings
 from app.db import SessionLocal
 from app.models import (AllocationRun, Application, AuditEvent, Course, CourseCompletion, Enrollment,
                         RegistrationPeriod, Section, StudentTerm, Term)
 from app.seed import seed, uid
+from conftest import FIXED, signin
 
 
 MAIN = uid('term/main')
@@ -26,16 +27,18 @@ def windows(db):
         RegistrationPeriod.term_id == MAIN))}
 
 
-def test_fresh_scoped_seed_has_one_public_term_and_main_recommendation_catalog(monkeypatch):
+@pytest.mark.parametrize('public_term', [MAIN, ''])
+def test_fresh_seed_publishes_full_catalog_only_in_main(client, monkeypatch, public_term):
     empty_database()
-    monkeypatch.setattr(settings, 'public_initial_term_id', MAIN)
-    seed('initial', recommendation_demo=True)
+    monkeypatch.setattr(settings, 'public_initial_term_id', public_term)
+    result = seed('initial', recommendation_demo=True, university_demo=True)
+    assert result['university_term_id'] == MAIN
     with SessionLocal() as db:
         terms = {term.id: term for term in db.scalars(select(Term))}
         history_id = uid('term/history')
         assert set(terms) == {MAIN, history_id}
         assert terms[MAIN].code.startswith('115-1') and terms[MAIN].catalog_published_at
-        assert terms[history_id].catalog_published_at is None
+        assert terms[history_id].archived_at is not None
         assert db.get(CourseCompletion, (uid('student/student01'), uid('course/CS201'), history_id))
         assert db.scalar(select(AllocationRun).where(AllocationRun.term_id == MAIN)) is None
         start, end = windows(db)['INITIAL']
@@ -47,6 +50,96 @@ def test_fresh_scoped_seed_has_one_public_term_and_main_recommendation_catalog(m
         # Adding recommendation sections cannot overwrite a student's main-term limit or enroll them.
         assert db.get(StudentTerm, (uid('student/student01'), MAIN)).credit_limit == 25
         assert db.scalar(select(Enrollment).where(Enrollment.student_id == uid('student/student01'))) is None
+
+    assert [row['id'] for row in client.get('/api/v1/terms').json()] == [MAIN]
+    path = f'/api/v1/terms/{MAIN}/sections'
+    assert client.get(path).json()['total'] == 58
+    for school, count in (('NTU', 15), ('NTNU', 11), ('NTUST', 14)):
+        items = client.get(path, params={'school_code': school, 'page_size': 50}).json()['items']
+        references = {row['course_id'] for row in items if row['catalog_origin'] == 'UNIVERSITY_REFERENCE'}
+        assert len(references) == count
+        assert all(row['term_id'] == MAIN and row['school_code'] == school for row in items)
+    signin(client, 'student11')
+    advice = client.post('/api/v1/chat', json={'message': '我是電子系學生，給我修課建議', 'term_id': MAIN}).json()
+    assert advice['mode'] == 'recommendation'
+    assert {row['school_code'] for row in advice['recommendation']['candidates']} == {'NTUST'}
+    signin(client, 'admin')
+    assert [row['id'] for row in client.get('/api/v1/admin/terms').json()] == [MAIN]
+
+
+def test_archived_terms_are_unavailable_to_active_views_and_routes(client):
+    from app.chat import public_engine
+
+    archived = uid('term/initial')
+    with SessionLocal.begin() as db:
+        db.get(Term, archived).archived_at = FIXED
+    assert [row['id'] for row in client.get('/api/v1/terms').json()] == [MAIN]
+    assert client.get(f'/api/v1/terms/{archived}/sections').status_code == 404
+    signin(client, 'admin')
+    assert [row['id'] for row in client.get('/api/v1/admin/terms').json()] == [MAIN]
+    assert client.get(f'/api/v1/admin/terms/{archived}/registration').status_code == 404
+    with public_engine().connect() as db:
+        for view in ('v_section_availability', 'v_public_section_catalog', 'v_public_section_meetings',
+                     'v_public_section_topics'):
+            assert db.scalar(text(f'SELECT count(*) FROM {view} WHERE term_id = :term_id'),
+                             {'term_id': archived}) == 0
+
+
+@pytest.mark.parametrize(('scenario', 'phase', 'follow_up', 'status', 'timetable_group'), [
+    ('initial', 'INITIAL', '請試排這個方向的本期課程。', 'PENDING', 'pending_items'),
+    ('add-drop', 'ADD_DROP', '請幫我自動選課。', 'ENROLLED', 'items'),
+])
+def test_roadmap_follow_up_selects_current_courses_with_gemini_enabled(
+        client, monkeypatch, scenario, phase, follow_up, status, timetable_group):
+    empty_database()
+    monkeypatch.setattr(settings, 'public_initial_term_id', MAIN if phase == 'INITIAL' else '')
+    monkeypatch.setattr(settings, 'chat_stub', False)
+    monkeypatch.setattr(settings, 'gemini_api_key', 'test-key-no-network')
+    monkeypatch.setattr(reg, 'now', lambda db: datetime.now(timezone.utc))
+    seed(scenario, recommendation_demo=True, university_demo=True)
+    signin(client)
+
+    question = '我想走嵌入式系統，請給我修課路徑。'
+    constraint = '請試排這個方向的課，只選臺科大週二 15:00 至 18:00 的 1 門課。'
+    model_messages = []
+
+    async def intent(message, **kwargs):
+        model_messages.append(message)
+        if message == question:
+            return '{"mode":"recommendation","tool":"recommend","track_code":"embedded_systems"}'
+        if message == constraint:
+            assert '"selected_track_code": "embedded_systems"' in kwargs['system_instruction']
+            return ('{"mode":"recommendation","tool":"recommend","school_code":"NTUST","target_count":1,'
+                    '"available_times":[{"weekday":2,"start_time":"15:00","end_time":"18:00"}]}')
+        return '{"mode":"clarify","tool":"clarify"}'
+
+    monkeypatch.setattr(chat, 'generate_content', intent)
+    consult = client.post('/api/v1/chat', json={'term_id': MAIN, 'message': question})
+    assert consult.status_code == 200, consult.text
+    advice = consult.json()['recommendation']
+    assert advice['plan'] is None
+
+    reply = client.post('/api/v1/chat', json={
+        'term_id': MAIN, 'message': follow_up, 'track_code': advice['roadmap']['track_code'],
+    })
+    assert reply.status_code == 200 and reply.json()['mode'] == 'recommendation', reply.text
+    assert model_messages == [question]
+    plan = reply.json()['recommendation']['plan']
+    assert plan['phase'] == phase and plan['term_id'] == MAIN and plan['section_ids']
+    filtered = client.post('/api/v1/chat', json={
+        'term_id': MAIN, 'message': constraint, 'track_code': advice['roadmap']['track_code'],
+    })
+    assert filtered.status_code == 200, filtered.text
+    assert filtered.json()['recommendation']['plan']['section_ids'] == [uid('section/main/EE301/A')]
+    assert model_messages == [question, constraint]
+    timetable_url = f'/api/v1/me/terms/{MAIN}/timetable'
+    before = client.get(timetable_url).json()
+    assert before['items'] == before['pending_items'] == []
+    confirm = client.post(f'/api/v1/me/terms/{MAIN}/selection-plans/{plan["plan_id"]}/confirm',
+                          json={'section_ids': plan['section_ids']}, headers={'Idempotency-Key': 'roadmap-confirm'})
+    assert confirm.status_code == 200, confirm.text
+    assert {item['status'] for item in confirm.json()['items']} == {status}
+    assert {row['id'] for row in client.get(timetable_url).json()[timetable_group]} == set(plan['section_ids'])
 
 
 def test_scoped_seed_reopens_old_demo_once_and_preserves_records(monkeypatch):

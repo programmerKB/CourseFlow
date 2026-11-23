@@ -14,6 +14,7 @@ import {
   type PlanConfirmation,
   type Recommendation,
   type Registration,
+  type Roadmap,
   type Section,
 } from "./api";
 
@@ -21,6 +22,7 @@ const REASONS: Record<string, string> = {
   ALREADY_ENROLLED: "已選上同課程",
   APPLICATION_EXISTS: "已有同課程的待分發登記",
   CREDIT_LIMIT_EXCEEDED: "超過學分上限",
+  COURSE_COMPLETED: "已有通過紀錄",
   NO_FEASIBLE_SECTIONS: "目前沒有符合試排條件的班別",
   PREREQUISITE_MISSING: "尚未通過先修課程",
   REGISTRATION_CLOSED: "目前不在可送出的選課時段",
@@ -266,11 +268,13 @@ function CourseCard({ course, onOpenSection }: { course: Candidate; onOpenSectio
         {course.course_code} {course.course_title} · {course.section_no} 班
       </button>
       <div className="recommend-card-status">
+        <span>{course.school_name} {course.department_name}</span>
         <span>{course.credits} 學分</span>
         <span>{course.remaining ? `剩餘 ${course.remaining} 席` : "已額滿"}</span>
         {!course.is_selectable && <span>未開放</span>}
       </div>
       <p>{course.match_reason}</p>
+      {course.source_url && <p><a href={course.source_url} target="_blank" rel="noreferrer">校方課程來源</a></p>}
       <MeetingList meetings={course.meetings} />
       <p>
         先修 {prerequisites.length ? prerequisites.map((p) => `${p.code} ${p.title}`).join("、") : "無指定科目"}
@@ -283,6 +287,65 @@ function CourseCard({ course, onOpenSection }: { course: Candidate; onOpenSectio
   );
 }
 
+const STAGES = { FOUNDATION: "基礎", SPECIALIZATION: "進階", RESEARCH: "研究專題" };
+const AVAILABILITY = {
+  OFFERED: "本期有公開班別",
+  NO_PUBLIC_SECTION: "本期無公開班別",
+  CURRICULUM_REFERENCE: "校方課程規劃參考",
+  TERM_NOT_SELECTED: "選擇學期後查看班別",
+};
+
+function ResearchRoadmap({ roadmap, onOpenSection }: { roadmap: Roadmap; onOpenSection: (id: string) => void }) {
+  const nextSections = new Set(roadmap.next_section_ids);
+  return (
+    <section aria-label="研究修課路徑">
+      <h4>{roadmap.title}修課路徑</h4>
+      <div className="roadmap-stages">
+        {roadmap.stages.map((stage) => (
+          <section key={stage.stage} className="roadmap-stage">
+            <h5>{STAGES[stage.stage]}</h5>
+            <ul>{stage.goals.map((goal) => <li key={goal}>{goal}</li>)}</ul>
+            {!!stage.courses.length && (
+              <ul className="roadmap-courses">
+                {stage.courses.map((course) => (
+                  <li key={course.course_code ?? course.title}>
+                    <strong>{course.title}</strong>
+                    <p>{course.school_name} {course.department_name}</p>
+                    <div className="recommend-card-status">
+                      <span>{AVAILABILITY[course.availability]}</span>
+                      {course.completed && <span>已通過</span>}
+                    </div>
+                    {course.source_url && <a href={course.source_url} target="_blank" rel="noreferrer">校方課程來源</a>}
+                    {course.sections.map((section) => (
+                      <div className="roadmap-section" key={section.section_id}>
+                        <button className="course-title" onClick={() => onOpenSection(section.section_id)}>
+                          {course.course_code} {section.section_no} 班
+                        </button>
+                        <span>{section.remaining > 0 ? `剩餘 ${section.remaining} 席` : "已額滿"} · {
+                          nextSections.has(section.section_id) ? "建議優先修課" : section.eligibility.eligible
+                            ? "資格符合" : reason(section.eligibility.reason_code)
+                        }</span>
+                        <MeetingList meetings={section.meetings} />
+                      </div>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {stage.milestone && (
+              <dl>
+                <dt>專題</dt><dd>{stage.milestone.project}</dd>
+                <dt>可重現成果</dt><dd>{stage.milestone.deliverable}</dd>
+                <dt>評估指標</dt><dd>{stage.milestone.metrics.join("、")}</dd>
+              </dl>
+            )}
+          </section>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export default function RecommendationCard({
   recommendation,
   currentRegistration,
@@ -290,6 +353,7 @@ export default function RecommendationCard({
   onConfirmed,
   onViewResult,
   onUpdate,
+  onPlanRoadmap,
   updating,
 }: {
   recommendation: Recommendation;
@@ -298,14 +362,16 @@ export default function RecommendationCard({
   onConfirmed: () => void;
   onViewResult: (phase: Plan["phase"]) => void;
   onUpdate: () => void;
+  onPlanRoadmap: (code: string) => void;
   updating: boolean;
 }) {
-  const { candidates, learning_extensions: extensions, plan } = recommendation;
+  const { candidates, learning_extensions: extensions, plan, roadmap } = recommendation;
   const registration = currentRegistration ?? recommendation.registration;
   const byId = new Map(candidates.map((entry) => [entry.section_id, entry]));
   return (
     <div className="recommendation">
-      {plan ? (
+      {roadmap && <ResearchRoadmap roadmap={roadmap} onOpenSection={onOpenSection} />}
+      {plan && registration ? (
         <PlanReview
           key={plan.plan_id}
           recommendation={recommendation}
@@ -315,7 +381,7 @@ export default function RecommendationCard({
           onConfirmed={onConfirmed}
           onViewResult={onViewResult}
         />
-      ) : (
+      ) : recommendation.plan_unavailable_reason && registration ? (
         <section className="recommend-plan">
           <h4>目前無可送出的試排</h4>
           <p>{reason(recommendation.plan_unavailable_reason)}</p>
@@ -328,7 +394,7 @@ export default function RecommendationCard({
             ))}
           </ul>
         </section>
-      )}
+      ) : null}
       {candidates.length > 0 && (
         <section>
           <h4>{recommendation.topic}相關課程</h4>
@@ -360,7 +426,11 @@ export default function RecommendationCard({
           </ul>
         </section>
       )}
-      <button className="small" onClick={onUpdate} disabled={updating}>更新試排</button>
+      {plan || recommendation.plan_unavailable_reason ? (
+        <button className="small" onClick={onUpdate} disabled={updating}>更新試排</button>
+      ) : roadmap && registration && ["INITIAL", "ADD_DROP"].includes(registration.phase) ? (
+        <button className="small" onClick={() => onPlanRoadmap(roadmap.track_code)} disabled={updating}>試排本期課程</button>
+      ) : null}
     </div>
   );
 }

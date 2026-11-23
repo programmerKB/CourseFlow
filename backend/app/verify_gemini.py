@@ -35,17 +35,17 @@ async def check_connection():
     await generate_content('Reply with OK.')
 
 
-def expected_results(db, main_term, research_term):
+def expected_results(db, term_id):
     course_ids = set(db.scalars(text('''
         SELECT c.section_id
-        FROM v_public_section_catalog c JOIN departments d ON d.id = c.department_id
-        WHERE c.term_id = :main_term AND d.code = 'EE' AND c.is_selectable AND c.remaining > 0
+        FROM v_public_section_catalog c
+        WHERE c.term_id = :term_id AND c.department_name LIKE '%電子工程%' AND c.is_selectable AND c.remaining > 0
         AND EXISTS (SELECT 1 FROM v_public_section_meetings m WHERE m.section_id = c.section_id AND m.weekday = 2)
         ORDER BY c.code, c.section_no, c.section_id LIMIT 20
-    '''), {'main_term': main_term}))
+    '''), {'term_id': term_id}))
     research_courses = {str(row.section_id): row.code for row in db.execute(text('''
-        SELECT section_id, code FROM v_public_section_catalog WHERE term_id = :research_term
-    '''), {'research_term': research_term})}
+        SELECT section_id, code FROM v_public_section_catalog WHERE term_id = :term_id
+    '''), {'term_id': term_id})}
     if not course_ids or not set(REFERENCE_COURSES).issubset(research_courses.values()):
         raise VerificationError('VERIFY_DEMO_DATA_REQUIRED')
     return {str(section_id) for section_id in course_ids}, research_courses
@@ -81,20 +81,19 @@ def main(connection_only=False):
         asyncio.run(check_connection())
         print('Gemini connection succeeded. Structured output and the course query have not been verified.')
         return
-    main_term = settings.public_initial_term_id or uid('term/main')
-    research_term = settings.public_initial_term_id or uid('term/recommendation-add-drop')
+    term_id = settings.public_initial_term_id or uid('term/main')
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.login == 'student01'))
         student = db.scalar(select(Student).where(Student.user_id == user.id)) if user else None
-        if student is None or any(db.get(Term, key) is None for key in (main_term, research_term)):
+        if student is None or db.get(Term, term_id) is None:
             raise VerificationError('VERIFY_DEMO_DATA_REQUIRED')
         actor = user_dict(user, student)
-        course_ids, research_courses = expected_results(db, main_term, research_term)
+        course_ids, research_courses = expected_results(db, term_id)
     with SessionLocal() as db:
-        result = asyncio.run(handle_chat(db, actor, COURSE_QUESTION, main_term, str(uuid4())))
+        result = asyncio.run(handle_chat(db, actor, COURSE_QUESTION, term_id, str(uuid4())))
         check_course_result(result, course_ids)
     with SessionLocal() as db:
-        research = asyncio.run(handle_chat(db, actor, RESEARCH_QUESTION, research_term, str(uuid4())))
+        research = asyncio.run(handle_chat(db, actor, RESEARCH_QUESTION, term_id, str(uuid4())))
         evidence = check_recommendation_result(research, research_courses)
     record = {'status': 'executed', 'model': settings.gemini_model, 'timestamp': datetime.now(timezone.utc).isoformat(),
               'query': COURSE_QUESTION, 'response': result,

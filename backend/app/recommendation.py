@@ -5,17 +5,22 @@ from unicodedata import normalize
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import select, text
+from sqlalchemy import exists, select, text
 
 from . import registration as reg
+from . import roadmap
+from .catalog_data import department_names, normalize_name, school_prefix
 from .db import SessionLocal
 from .errors import DomainError
-from .models import Department, RegistrationPeriod, SelectionPlan, SelectionPlanItem
+from .models import Course, Department, RegistrationPeriod, School, Section, SelectionPlan, SelectionPlanItem
+from .roadmap_data import REFERENCES, TRACKS
 
 
 # Changes to this mapping change how the same research question is ranked.
-TOPIC_MAP_VERSION = '1'
+TOPIC_MAP_VERSION = '3.2'
 TOPIC_MAP = {
+    **{code: {'label': track.title, 'aliases': (track.title, *track.aliases),
+              'keywords': (track.title, *track.aliases), 'related': ()} for code, track in TRACKS.items()},
     'llm': {
         'label': '大語言模型',
         'aliases': ('大語言模型', '大型語言模型', '大型語言模型研究', 'LLM', 'large language model', 'large language models'),
@@ -33,6 +38,7 @@ PREVIEW_REASONS = {
     'TERM_INELIGIBLE': '尚無此學期的修課資格。',
     'REGISTRATION_PHASE_CHANGED': '選課階段已變更，請更新試排。',
     'NO_FEASIBLE_SECTIONS': '目前沒有可加入試排的班別。',
+    'COURSE_COMPLETED': '已通過此課程。',
 }
 
 
@@ -52,36 +58,30 @@ def normalize_keyword(value):
     return normalize('NFKC', value).strip().casefold()
 
 
-def find_department(db, name, department_id):
+def find_departments(db, name, department_id, *, school=None, term_id=None):
+    requested, explicit_school = school_prefix(normalize_name(name or ''))
+    if explicit_school and school and explicit_school != school:
+        return []
+    school = explicit_school or school
+    stmt = select(Department, School.code).join(School, School.id == Department.school_id)
+    if school:
+        stmt = stmt.where(School.code == school)
+    if term_id:
+        stmt = stmt.where(exists(select(Section.id).join(Course, Course.id == Section.course_id).where(
+            Section.term_id == term_id, Course.department_id == Department.id)))
+    rows = db.execute(stmt.order_by(School.code, Department.code)).all()
     if department_id:
         try:
             key = str(UUID(department_id))
         except ValueError:
             key = None
-        if key:
-            department = db.get(Department, key)
-            if department:
-                return department
-    requested = normalize_keyword(name or '')
+        matching_id = [department for department, _ in rows if department.id == key]
+        if matching_id:
+            return matching_id
     if not requested:
-        return None
-    departments = list(db.scalars(select(Department)))
-    exact = [d for d in departments if requested in (normalize_keyword(d.name), normalize_keyword(d.code))]
-    if exact:
-        return exact[0] if len(exact) == 1 else None
-
-    short_name = requested.replace('學系', '系')
-    aliases = []
-    for department in departments:
-        title = normalize_keyword(department.name).replace('學系', '系')
-        names = {title}
-        if title.endswith('工程系'):
-            names.add(title.removesuffix('工程系') + '系')
-        if title == '資訊工程系':
-            names.add('資工系')
-        if short_name in names:
-            aliases.append(department)
-    return aliases[0] if len(aliases) == 1 else None
+        return []
+    exact = [d for d, school_code in rows if requested in department_names(d.code, d.name, school_code)]
+    return exact or [d for d, _ in rows if requested in normalize_name(d.name)]
 
 
 def topic_code(topic):
@@ -123,11 +123,14 @@ RELATED_SECTIONS = text('''
                   WHERE t.term_id = c.term_id AND t.section_id = c.section_id ORDER BY t.topic_code) AS topic_codes,
             (SELECT key.word FROM unnest(CAST(:keywords AS text[])) WITH ORDINALITY AS key(word, position)
              WHERE strpos(lower(c.title), key.word) > 0 OR strpos(lower(c.description), key.word) > 0
-             ORDER BY key.position LIMIT 1) AS keyword_hit
+             ORDER BY key.position LIMIT 1) AS keyword_hit,
+            c.code = ANY(CAST(:roadmap_courses AS text[])) AS roadmap_match
         FROM v_public_section_catalog c WHERE c.term_id = CAST(:term_id AS uuid)
+          AND (CAST(:school_code AS text) IS NULL OR c.school_code = :school_code)
+          AND (NOT :has_seats OR (c.is_selectable AND c.remaining > 0))
     ), ranked AS (
         SELECT *, (CASE WHEN cardinality(direct_labels) > 0 THEN 6 ELSE 0 END
-                 + CASE WHEN cardinality(related_labels) > 0 THEN 3 ELSE 0 END
+                 + CASE WHEN cardinality(related_labels) > 0 OR (roadmap_match AND cardinality(direct_labels) = 0) THEN 3 ELSE 0 END
                  + CASE WHEN keyword_hit IS NOT NULL THEN 1 ELSE 0 END) AS score
         FROM matches
     )
@@ -135,11 +138,12 @@ RELATED_SECTIONS = text('''
 ''')
 
 
-def search_related_sections(engine, term_id, topic, keywords):
+def search_related_sections(engine, term_id, topic, keywords, *, school=None, has_seats=False, roadmap_courses=()):
     code, label, related, words = resolve_subject(topic, keywords)
     with engine.connect() as connection:
         rows = connection.execute(RELATED_SECTIONS, {
             'term_id': term_id, 'topic_code': code, 'related_topics': list(related), 'keywords': words,
+            'school_code': school, 'has_seats': has_seats, 'roadmap_courses': list(roadmap_courses),
         }).mappings().all()
     return code, label, rows
 
@@ -159,6 +163,8 @@ def match_reason(row):
         reasons.append('主題標籤：' + '、'.join(row['direct_labels']))
     if row['related_labels']:
         reasons.append('相關標籤：' + '、'.join(row['related_labels']))
+    if row['roadmap_match'] and not reasons:
+        reasons.append('對應研究修課路徑')
     if row['keyword_hit']:
         word = row['keyword_hit']
         if word in row['title'].lower():
@@ -185,17 +191,24 @@ def learning_extensions(code, matches):
     return extensions
 
 
-def within_availability(meetings, availability):
-    return not availability or all(any(
-        meeting['weekday'] == slot.weekday and slot.start_time <= meeting['start_time'] and meeting['end_time'] <= slot.end_time
-        for slot in availability
-    ) for meeting in meetings)
-
-
 def build_selection_plan(engine, student_id, term_id, topic, keywords, target_count, availability,
-                         *, department=None, has_seats=False):
+                         *, department=None, has_seats=False, school=None, track_code=None, create_draft=True):
+    track = TRACKS.get(track_code)
+    if track and not term_id:
+        with SessionLocal() as db:
+            return {
+                'topic': track.title, 'target_count': target_count, 'candidates': [], 'learning_extensions': [],
+                'baseline': None, 'registration': None, 'plan': None, 'plan_unavailable_reason': None,
+                'roadmap': roadmap.build_roadmap(db, student_id, track_code, school=school),
+            }
     if department is None:
-        code, label, matches = search_related_sections(engine, term_id, topic, keywords)
+        planned_codes = (*track.foundation, *track.specialization) if track else ()
+        if track_code == 'llm' and create_draft:
+            planned_codes = track.specialization
+        code, label, matches = search_related_sections(
+            engine, term_id, track_code or topic, keywords, school=school, has_seats=has_seats,
+            roadmap_courses=[key for key in planned_codes if key not in REFERENCES],
+        )
     else:
         code, label = None, department.name
         with engine.connect() as connection:
@@ -218,15 +231,20 @@ def build_selection_plan(engine, student_id, term_id, topic, keywords, target_co
         baseline_credits = reg.baseline_credits(baseline, policy_phase) if baseline is not None else Decimal('0.0')
         ids = [str(row['section_id']) for row in matches]
         sections = {row['id']: row for row in reg.section_rows(db, ids)}
-        selected, candidates = [], []
-        for row in matches:
-            section = sections[str(row['section_id'])]
+        selected, candidates = [], {}
+        foundations = set(track.foundation) if track and (track_code != 'llm' or not create_draft) else set()
+        for row in sorted(matches, key=lambda row: row.get('code') not in foundations):
+            section = sections.get(str(row['section_id']))
+            if section is None:
+                continue
             if baseline is None:
                 eligibility, reason = None, 'TERM_INELIGIBLE'
             else:
                 eligibility_reason, _ = reg.evaluate_admission(term_id, section, baseline, policy_phase)
                 reason = eligibility_reason
-                if not reason and not within_availability(section['meetings'], availability):
+                if not reason and track and section['course_id'] in baseline.passed_courses:
+                    reason = 'COURSE_COMPLETED'
+                if not reason and not reg.within_availability(section['meetings'], availability):
                     reason = 'TIME_PREFERENCE_MISMATCH'
                 if not open_for_confirmation:
                     eligibility_reason = eligibility_reason or 'REGISTRATION_CLOSED'
@@ -239,17 +257,22 @@ def build_selection_plan(engine, student_id, term_id, topic, keywords, target_co
                         reason, _ = reg.evaluate_admission(term_id, section, baseline, policy_phase, planned=selected)
             if reason is None:
                 selected.append(section)
-            candidates.append({
+            candidates[section['id']] = {
                 'section_id': section['id'], 'course_code': section['code'], 'course_title': section['title'],
                 'section_no': section['section_no'], 'credits': str(section['credits']), 'meetings': section['meetings'],
                 'remaining': section['remaining'], 'is_selectable': section['is_selectable'],
                 'prerequisites': section['prerequisites'], 'eligibility': eligibility,
-                'score': row['score'], 'selected': reason is None, 'reason_code': reason,
+                'school_code': section['school_code'], 'school_name': section['school_name'],
+                'department_name': section['department_name'], 'catalog_origin': section['catalog_origin'],
+                'source_url': section['source_url'],
+                'score': row['score'], 'selected': create_draft and reason is None, 'reason_code': reason,
                 'match_reason': (f'開課系所：{row["department_name"]}。' if department is not None else match_reason(row)),
-            })
+            }
 
         plan = None
-        if student_term is None:
+        if not create_draft:
+            unavailable_reason = None
+        elif student_term is None:
             unavailable_reason = 'TERM_INELIGIBLE'
         elif not open_for_confirmation:
             unavailable_reason = 'REGISTRATION_CLOSED'
@@ -260,7 +283,7 @@ def build_selection_plan(engine, student_id, term_id, topic, keywords, target_co
             window = db.get(RegistrationPeriod, (term_id, phase))
             if reg.phase(db, term, created_at) != phase:
                 unavailable_reason = 'REGISTRATION_PHASE_CHANGED'
-                for candidate in candidates:
+                for candidate in candidates.values():
                     if candidate['selected']:
                         candidate.update(selected=False, reason_code=unavailable_reason)
             else:
@@ -278,8 +301,9 @@ def build_selection_plan(engine, student_id, term_id, topic, keywords, target_co
                         'projected_credits': str(baseline_credits + sum(section['credits'] for section in selected))}
                 unavailable_reason = None
 
-        return {
-            'topic': label, 'target_count': target_count, 'candidates': candidates,
+        result = {
+            'topic': label, 'target_count': target_count,
+            'candidates': [candidates[str(row['section_id'])] for row in matches if str(row['section_id']) in candidates],
             'learning_extensions': learning_extensions(code, matches), 'plan': plan,
             'baseline': None if baseline is None else {
                 'enrolled': baseline.enrolled, 'pending': baseline.pending,
@@ -287,6 +311,11 @@ def build_selection_plan(engine, student_id, term_id, topic, keywords, target_co
             },
             'registration': registration, 'plan_unavailable_reason': unavailable_reason,
         }
+        if track:
+            result['roadmap'] = roadmap.build_roadmap(db, student_id, track_code, term=term, baseline=baseline,
+                                                      phase=phase, school=school, availability=availability)
+            result['roadmap']['next_section_ids'] = [section['id'] for section in selected]
+        return result
 
 
 def describe_plan(recommendation):
@@ -295,7 +324,7 @@ def describe_plan(recommendation):
     if not candidates:
         return '這個學期找不到符合條件的班別。請調整系所或關鍵字。'
     message = f'找到 {len(candidates)} 個相關班別，目標 {target} 門，目前可試排 {count} 門。'
-    if not plan:
+    if not plan and recommendation['plan_unavailable_reason']:
         message += PREVIEW_REASONS[recommendation['plan_unavailable_reason']]
     if count < target:
         reasons = dict.fromkeys(row['reason_code'] for row in candidates if row['reason_code'])

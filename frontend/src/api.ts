@@ -20,6 +20,14 @@ export type Meeting = {
   end_time: string;
   room: string;
 };
+export type Department = { id: string; code: string; name: string; school_code: string; school_name: string };
+export type School = {
+  id: string;
+  code: string;
+  name: string;
+  departments: Pick<Department, "id" | "code" | "name">[];
+};
+export type Topic = { code: string; label: string };
 export type Section = {
   id: string;
   term_id: string;
@@ -30,6 +38,11 @@ export type Section = {
   section_no: string;
   department_id: string;
   department_name: string;
+  school_code: string;
+  school_name: string;
+  catalog_origin: "UNIVERSITY_REFERENCE" | "PROJECT_DEMO";
+  source_url: string | null;
+  topics: Topic[];
   instructor_id: string;
   instructor_name: string;
   credits: number | string;
@@ -97,6 +110,11 @@ export type Candidate = {
   course_code: string;
   course_title: string;
   section_no: string;
+  school_code: string;
+  school_name: string;
+  department_name: string;
+  source_url: string | null;
+  catalog_origin: Section["catalog_origin"];
   credits: string;
   meetings: Meeting[];
   remaining: number;
@@ -128,9 +146,51 @@ export type Recommendation = {
     considered_credits: string;
     credit_limit: string;
   } | null;
-  registration: Registration;
+  registration: Registration | null;
   plan: Plan | null;
   plan_unavailable_reason: string | null;
+  roadmap?: Roadmap;
+};
+export type RoadmapCourse = {
+  title: string;
+  course_code?: string;
+  school_code: string;
+  school_name: string;
+  department_name: string;
+  source_url?: string | null;
+  completed: boolean | null;
+  availability: "OFFERED" | "NO_PUBLIC_SECTION" | "CURRICULUM_REFERENCE" | "TERM_NOT_SELECTED";
+  sections: {
+    section_id: string;
+    section_no: string;
+    remaining: number;
+    meetings: Meeting[];
+    eligibility: Pick<Eligibility, "eligible" | "reason_code">;
+    source: Source;
+  }[];
+};
+export type Roadmap = {
+  track_code: string;
+  title: string;
+  next_section_ids?: string[];
+  stages: {
+    stage: "FOUNDATION" | "SPECIALIZATION" | "RESEARCH";
+    goals: string[];
+    courses: RoadmapCourse[];
+    milestone: { project: string; deliverable: string; metrics: string[] } | null;
+  }[];
+};
+export type CourseChoice = {
+  section_id: string;
+  code: string;
+  title: string;
+  school_code: string;
+  school_name: string;
+  department_name: string;
+  section_no: string;
+  meetings: Meeting[];
+  remaining: number;
+  is_selectable: boolean;
 };
 export type ChatResponse = {
   answer: string;
@@ -139,6 +199,26 @@ export type ChatResponse = {
   mode: string;
   request_id: string;
   recommendation?: Recommendation;
+  choices?: CourseChoice[];
+  choice_total?: number;
+  track_choices?: { track_code: string; title: string }[];
+  registration?: Registration;
+  transcript?: string;
+  transcript_status?: "CLEAR" | "UNCLEAR" | "SILENT";
+  action?: {
+    status: "ENROLLED";
+    term_id: string;
+    enrollment_id: string;
+    section_id: string;
+    school_code: string;
+    school_name: string;
+    department_name: string;
+    course_title: string;
+    section_no: string;
+    total_credits: string;
+    remaining: number;
+    submitted_at: string;
+  };
 };
 export type PlanConfirmation = {
   plan_id: string;
@@ -173,7 +253,7 @@ export async function api<T = any>(
       ...options,
       headers: {
         Accept: "application/json",
-        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(typeof options.body === "string" ? { "Content-Type": "application/json" } : {}),
         ...options.headers,
       },
     });

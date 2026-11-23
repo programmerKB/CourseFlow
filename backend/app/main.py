@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 import time
@@ -11,14 +12,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 from pydantic import Field, model_validator
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
+from starlette.concurrency import run_in_threadpool
 from .config import settings
 from .db import get_db
 from .errors import DomainError
 from .auth import current_user, student_user, admin_user, COOKIE_NAME, login
-from .models import Term, Department, Instructor, Course, AuthSession, NotificationOutbox
-from . import registration as reg, admin
+from .models import Term, School, Department, Instructor, Course, AuthSession, NotificationOutbox, Topic
+from . import registration as reg, admin, voice
 from .admin import UUIDStr, StrictModel
 
 log = logging.getLogger('courses')
@@ -127,7 +130,27 @@ def terms(db=Depends(get_db)):
 
 @app.get(prefix + '/departments')
 def departments(db=Depends(get_db)):
-    return [{'id': d.id, 'code': d.code, 'name': d.name} for d in db.scalars(select(Department).order_by(Department.code))]
+    return [{'id': d.id, 'code': d.code, 'name': d.name, 'school_code': s.code, 'school_name': s.name}
+            for d, s in db.execute(select(Department, School).join(School, School.id == Department.school_id)
+                                   .order_by(School.code, Department.code))]
+
+
+@app.get(prefix + '/schools')
+def schools(db=Depends(get_db)):
+    rows = db.execute(select(School, Department).outerjoin(Department, Department.school_id == School.id)
+                      .order_by(School.code, Department.code))
+    result = {}
+    for school, department in rows:
+        entry = result.setdefault(school.code, {'id': school.id, 'code': school.code, 'name': school.name,
+                                               'departments': []})
+        if department:
+            entry['departments'].append({'id': department.id, 'code': department.code, 'name': department.name})
+    return list(result.values())
+
+
+@app.get(prefix + '/topics')
+def topics(db=Depends(get_db)):
+    return [{'code': topic.code, 'label': topic.label} for topic in db.scalars(select(Topic).order_by(Topic.code))]
 
 
 @app.get(prefix + '/terms/{term_id}/registration')
@@ -138,9 +161,12 @@ def registration(term_id: UUIDStr, db=Depends(get_db)):
 @app.get(prefix + '/terms/{term_id}/sections')
 def sections(term_id: UUIDStr, q: str | None = Query(None, max_length=100), department_id: UUIDStr | None = None,
              instructor: str | None = Query(None, max_length=100), weekday: int | None = Query(None, ge=1, le=7),
+             school_code: str | None = Query(None, max_length=16), topic_code: str | None = Query(None, max_length=64),
              page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=50), db=Depends(get_db)):
     reg.get_term(db, term_id)
-    return reg.list_sections(db, term_id, q, department_id, instructor, weekday, page, page_size)
+    return reg.list_sections(db, term_id, q, department_id, instructor, weekday, page, page_size,
+                             school_code=school_code.strip().upper() if school_code else None,
+                             topic_code=topic_code.strip().lower() if topic_code else None)
 
 
 @app.get(prefix + '/terms/{term_id}/sections/{section_id}')
@@ -171,6 +197,7 @@ class EnrollmentInput(StrictModel):
 
 
 RequestKey = Annotated[str, Header(alias='Idempotency-Key', min_length=1, max_length=200)]
+OptionalRequestKey = Annotated[str | None, Header(alias='Idempotency-Key', min_length=1, max_length=200)]
 
 
 class PlanConfirmInput(StrictModel):
@@ -246,7 +273,7 @@ def catalog(user=Depends(admin_user), db=Depends(get_db)):
 
 @app.get(prefix + '/admin/terms')
 def admin_terms(user=Depends(admin_user), db=Depends(get_db)):
-    return [admin.term_dict(t) for t in db.scalars(select(Term).order_by(Term.start_date.desc(), Term.code))]
+    return [admin.term_dict(t) for t in db.scalars(reg.active_terms_query().order_by(Term.start_date.desc(), Term.code))]
 
 
 @app.post(prefix + '/admin/terms', status_code=201)
@@ -269,10 +296,13 @@ def period_update(term_id: UUIDStr, body: admin.PeriodsInput, user=Depends(admin
 @app.get(prefix + '/admin/terms/{term_id}/sections')
 def admin_sections(term_id: UUIDStr, q: str | None = Query(None, max_length=100), department_id: UUIDStr | None = None,
                    instructor: str | None = Query(None, max_length=100), weekday: int | None = Query(None, ge=1, le=7),
+                   school_code: str | None = Query(None, max_length=16), topic_code: str | None = Query(None, max_length=64),
                    page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=50),
                    user=Depends(admin_user), db=Depends(get_db)):
     reg.get_term(db, term_id, public=False)
-    return reg.list_sections(db, term_id, q, department_id, instructor, weekday, page, page_size)
+    return reg.list_sections(db, term_id, q, department_id, instructor, weekday, page, page_size,
+                             school_code=school_code.strip().upper() if school_code else None,
+                             topic_code=topic_code.strip().lower() if topic_code else None)
 
 
 @app.post(prefix + '/admin/terms/{term_id}/sections', status_code=201)
@@ -316,9 +346,84 @@ def notifications(term_id: UUIDStr, page: int = Query(1, ge=1), page_size: int =
 class ChatInput(StrictModel):
     message: str = Field(min_length=1, max_length=1000)
     term_id: UUIDStr | None = None
+    section_id: UUIDStr | None = Field(default=None, description='學生明確點選的候選班別，須附原加選指令。')
+    track_code: str | None = Field(default=None, max_length=64, description='先前選定的研究方向，用於接續試排。')
 
 
-@app.post(prefix + '/chat')
-async def chat(body: ChatInput, request: Request, user=Depends(student_user), db=Depends(get_db)):
+class ChatSource(StrictModel):
+    title: str
+    url: str
+    term_id: UUIDStr | None = None
+    section_id: UUIDStr | None = None
+
+
+class ChatEnrollment(StrictModel):
+    status: Literal['ENROLLED']
+    term_id: UUIDStr
+    enrollment_id: UUIDStr
+    section_id: UUIDStr
+    school_code: str
+    school_name: str
+    department_name: str
+    course_title: str
+    section_no: str
+    total_credits: str
+    remaining: int
+    submitted_at: datetime
+
+
+class ChatOutput(StrictModel):
+    mode: Literal['simple_chat', 'sql_query', 'student_query', 'recommendation', 'clarify', 'add_course']
+    answer: str
+    sources: list[ChatSource]
+    as_of: datetime
+    request_id: str
+    recommendation: dict | None = None
+    action: ChatEnrollment | None = None
+    registration: dict | None = None
+    choices: list[dict] | None = None
+    choice_total: int | None = None
+    track_choices: list[dict] | None = None
+    transcript: str | None = None
+    transcript_status: Literal['CLEAR', 'UNCLEAR', 'SILENT'] | None = None
+
+
+@app.post(prefix + '/chat', response_model=ChatOutput, response_model_exclude_unset=True)
+async def chat(body: ChatInput, request: Request, request_key: OptionalRequestKey = None,
+               user=Depends(student_user), db=Depends(get_db)):
     from .chat import handle_chat
-    return await handle_chat(db, user, body.message, body.term_id, request.state.request_id)
+    return await handle_chat(db, user, body.message, body.term_id, request.state.request_id, request_key=request_key,
+                             selected_section=body.section_id, track_context=body.track_code)
+
+
+@app.post(prefix + '/chat/voice', openapi_extra=voice.FORM_SCHEMA,
+          response_model=ChatOutput, response_model_exclude_unset=True)
+async def chat_voice(request: Request, request_key: RequestKey, user=Depends(student_user), db=Depends(get_db)):
+    from .chat import handle_chat
+    from .chat_enrollment import existing_response, fingerprint
+
+    deadline = time.monotonic() + 30
+    transcript = ''
+    try:
+        async with asyncio.timeout(30):
+            audio, media_type, term_id = await voice.receive_audio(request)
+            try:
+                term_id = TypeAdapter(UUIDStr | None).validate_python(term_id)
+            except ValidationError:
+                raise DomainError(422, 'VALIDATION_ERROR', '學期識別碼格式不正確。') from None
+            digest = fingerprint(term_id, 'CHAT_VOICE', audio)
+            replay = await run_in_threadpool(existing_response, user, term_id, request_key, digest)
+            if replay is not None:
+                return replay
+            transcript = await voice.recognize(audio, media_type, request.state.request_id)
+            del audio
+            result = await handle_chat(db, user, transcript, term_id, request.state.request_id,
+                                       request_key=request_key, digest=digest, channel='CHAT_VOICE', deadline=deadline)
+            return {'transcript': transcript, 'transcript_status': 'CLEAR', **result}
+    except TimeoutError:
+        raise voice.unavailable() from None
+    except DomainError as error:
+        if not transcript:
+            raise
+        raise DomainError(error.status, error.code, error.message,
+                          {'transcript': transcript, 'transcript_status': 'CLEAR', **(error.details or {})}) from None
