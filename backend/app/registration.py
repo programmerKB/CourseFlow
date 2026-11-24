@@ -8,6 +8,7 @@ import json
 from datetime import timezone
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import NamedTuple
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -29,10 +30,18 @@ REASONS = {
     'APPLICATION_EXISTS': '已登記同課程的班別，請先取消原登記。',
     'PREREQUISITE_MISSING': '尚未在先前學期通過全部先修科目。',
     'TIME_CONFLICT': '此班別與目前正式課表的上課時間重疊。',
-    'CREDIT_LIMIT_EXCEEDED': '加選後總學分超過本學期學分上限。',
+    'CREDIT_LIMIT_EXCEEDED': '加選後總學分超過本學期學分上限（每學期最多 18 學分）。',
     'SECTION_FULL': '此班別已額滿。',
     'REGISTRATION_CLOSED': '目前不在可操作的選課階段。',
 }
+# Teacher specification: no student may exceed 18 credits per term. A lower
+# individual student_terms.credit_limit still applies (SRS §4.2 rule 5).
+MAX_TERM_CREDITS = Decimal('18.0')
+CONFIRMATION_TYPE = 'REGISTRATION_CONFIRMATION'
+
+
+def effective_credit_limit(limit):
+    return min(Decimal(limit), MAX_TERM_CREDITS)
 
 
 def now(db):
@@ -208,7 +217,7 @@ def timetable_snapshot(db, st):
     pending_items = [section for section in sections if section['id'] not in enrolled_ids]
     return {'items': items, 'pending_items': pending_items,
             'total_credits': sum((s['credits'] for s in items), Decimal('0.0')),
-            'credit_limit': st.credit_limit, 'as_of': now(db)}
+            'credit_limit': effective_credit_limit(st.credit_limit), 'as_of': now(db)}
 
 
 @dataclass(frozen=True)
@@ -229,7 +238,8 @@ def load_admission_state(db, st, term, *, include_pending=True):
     passed_courses = set(db.scalars(select(CourseCompletion.course_id)
         .join(Term, Term.id == CourseCompletion.completed_term_id)
         .where(CourseCompletion.student_id == st.student_id, Term.end_date < term.start_date)))
-    return AdmissionState([rows[sid] for sid in enrolled_ids], [rows[sid] for sid in pending_ids], passed_courses, st.credit_limit)
+    return AdmissionState([rows[sid] for sid in enrolled_ids], [rows[sid] for sid in pending_ids], passed_courses,
+                          effective_credit_limit(st.credit_limit))
 
 
 def baseline_credits(baseline, phase):
@@ -420,13 +430,44 @@ def queue_timetable_email(db, student_id, term_id, user_id, request_key):
     return 201, body
 
 
-def audit_enrollment(db, actor_user_id, enrollment, action, plan_id=None, *, channel=None):
-    payload = {'section_id': enrollment.section_id, 'source': 'ADD_DROP'}
+def audit_enrollment(db, actor_user_id, enrollment, action, plan_id=None, *, channel=None, extra=None):
+    payload = {'section_id': enrollment.section_id, 'source': 'ADD_DROP', **(extra or {})}
     if plan_id:
         payload['plan_id'] = plan_id
     if channel:
         payload['channel'] = channel
-    audit(db, actor_user_id, enrollment.term_id, action, 'enrollment', enrollment.id, payload)
+    return audit(db, actor_user_id, enrollment.term_id, action, 'enrollment', enrollment.id, payload)
+
+
+def enrolled_credits(db, student_id, term_id):
+    return db.scalar(select(func.coalesce(func.sum(Section.credits), Decimal('0.0')))
+        .join(Enrollment, Enrollment.section_id == Section.id).where(
+            Enrollment.student_id == student_id, Enrollment.term_id == term_id,
+            Enrollment.status == 'ENROLLED'))
+
+
+def queue_registration_confirmation(db, term, student_id, sections, operation, operation_id, *, credit_limit,
+                                    submitted_at, channel=None):
+    """Add the Gmail confirmation event in the caller's enrollment transaction (FR-24).
+
+    One event per successful operation: a single add, one confirmed draft, or one
+    allocation batch for a student. Replays reuse the committed response instead.
+    """
+    student = db.get(Student, student_id)
+    fields = ('code', 'title', 'section_no', 'credits', 'school_name', 'department_name', 'meetings')
+    payload = {'term_code': term.code, 'operation': operation, 'channel': channel,
+               'items': [{**{field: section[field] for field in fields}, 'credits': str(section['credits'])}
+                         for section in sections],
+               'total_credits': str(enrolled_credits(db, student_id, term.id)),
+               'credit_limit': str(effective_credit_limit(credit_limit)), 'submitted_at': submitted_at,
+               'url': '/timetable?' + urlencode({'term': term.id})}
+    notification_id = str(uuid4())
+    db.add(NotificationOutbox(
+        id=notification_id, term_id=term.id, recipient_user_id=student.user_id, type=CONFIRMATION_TYPE,
+        event_key=f'registration-confirmation:{student_id}:{term.id}:{operation.lower()}:{operation_id}',
+        payload=jsonable_encoder(payload)))
+    db.flush()
+    return notification_id
 
 
 def lock_add_drop_section(db, term, section_id):
@@ -438,18 +479,40 @@ def lock_add_drop_section(db, term, section_id):
     return section
 
 
-def add_enrollment(db, term, st, section_id, actor_user_id, *, channel=None):
+class EnrollmentResult(NamedTuple):
+    enrollment: Enrollment
+    section: dict
+    total_credits: Decimal
+    notification_id: str | None
+
+
+def add_enrollment(db, term, st, section_id, actor_user_id, *, channel=None, extra=None):
+    """The single add path shared by the web, the English agent and Chinese commands."""
     section = lock_add_drop_section(db, term, section_id)
     code, details = admission_error(db, st, term, section)
     if code:
         raise DomainError(409, code, REASONS[code], details)
     enrollment = enroll(db, st.student_id, term.id, section, 'ADD_DROP')
-    audit_enrollment(db, actor_user_id, enrollment, 'ENROLLED', channel=channel)
-    total_credits = db.scalar(select(func.coalesce(func.sum(Section.credits), Decimal('0.0')))
-        .join(Enrollment, Enrollment.section_id == Section.id).where(
-            Enrollment.student_id == st.student_id, Enrollment.term_id == term.id,
-            Enrollment.status == 'ENROLLED'))
-    return enrollment, section_dict(db, section), total_credits
+    event = audit_enrollment(db, actor_user_id, enrollment, 'ENROLLED', channel=channel, extra=extra)
+    details = section_dict(db, section)
+    notification_id = queue_registration_confirmation(
+        db, term, st.student_id, [details], 'ADD', event.id, credit_limit=st.credit_limit,
+        submitted_at=now(db), channel=channel or 'WEB')
+    return EnrollmentResult(enrollment, details, enrolled_credits(db, st.student_id, term.id), notification_id)
+
+
+def drop_enrollment(db, term, st, section_id, actor_user_id, *, channel=None, extra=None):
+    """Drop the student's active enrollment. Drops never queue a confirmation email."""
+    section = lock_add_drop_section(db, term, section_id)
+    enrollment = db.scalar(select(Enrollment).where(
+        Enrollment.student_id == st.student_id, Enrollment.term_id == term.id,
+        Enrollment.section_id == section_id, Enrollment.status == 'ENROLLED'))
+    if not enrollment:
+        raise DomainError(404, 'ENROLLMENT_NOT_FOUND', '找不到此班別的有效選課。')
+    enrollment.status, enrollment.updated_at = 'DROPPED', now(db)
+    db.flush()
+    audit_enrollment(db, actor_user_id, enrollment, 'DROPPED', channel=channel, extra=extra)
+    return EnrollmentResult(enrollment, section_dict(db, section), enrolled_credits(db, st.student_id, term.id), None)
 
 
 def enrollment_change(db, student_id, term_id, section_id, actor_user_id, request_key, method, path):
@@ -460,21 +523,15 @@ def enrollment_change(db, student_id, term_id, section_id, actor_user_id, reques
     if replay is not None:
         return replay
     if method == 'POST':
-        e, details, total_credits = add_enrollment(db, term, st, section_id, actor_user_id)
+        e, details, total_credits, notification_id = add_enrollment(db, term, st, section_id, actor_user_id)
         status = 201
         body = jsonable_encoder({'enrollment': {'id': e.id, 'section_id': section_id, 'status': e.status, 'source': e.source},
                                   'remaining': details['remaining'], 'total_credits': total_credits,
-                                  'as_of': now(db)})
+                                  'credit_limit': effective_credit_limit(st.credit_limit),
+                                  'notification_id': notification_id, 'as_of': now(db)})
     else:
-        lock_add_drop_section(db, term, section_id)
-        e = db.scalar(select(Enrollment).where(Enrollment.student_id == student_id, Enrollment.term_id == term_id,
-                                              Enrollment.section_id == section_id, Enrollment.status == 'ENROLLED'))
-        if not e:
-            raise DomainError(404, 'ENROLLMENT_NOT_FOUND', '找不到此班別的有效選課。')
-        e.status, e.updated_at = 'DROPPED', now(db)
-        db.flush()
+        drop_enrollment(db, term, st, section_id, actor_user_id)
         status, body = 204, None
-        audit_enrollment(db, actor_user_id, e, 'DROPPED')
     record_response(db, student_id, term_id, request_key, fingerprint, status, body)
     db.flush()
     return status, body
@@ -543,7 +600,13 @@ def confirm_selection_plan(db, student_id, term_id, plan_id, section_ids, actor_
         results.append({'section_id': section.id, 'status': status})
 
     plan.status, plan.confirmed_at = 'SUBMITTED', at
-    body = jsonable_encoder({'plan_id': plan_id, 'phase': current_phase, 'items': results, 'submitted_at': at})
+    body = {'plan_id': plan_id, 'phase': current_phase, 'items': results, 'submitted_at': at}
+    if current_phase == 'ADD_DROP':
+        # One confirmation email for one successful draft; pending initial registrations get none.
+        body['notification_id'] = queue_registration_confirmation(
+            db, term, student_id, section_rows(db, [row['id'] for row in validated]), 'PLAN', plan_id,
+            credit_limit=st.credit_limit, submitted_at=at, channel='SELECTION_PLAN')
+    body = jsonable_encoder(body)
     record_response(db, student_id, term_id, request_key, fingerprint, 200, body)
     db.flush()
     return 200, body
@@ -586,6 +649,12 @@ def allocate(db, term_id, actor_user_id):
         db.add(NotificationOutbox(event_key=f'allocation:{run.id}:{sid}', term_id=term_id, recipient_user_id=student.user_id,
                                   type='ALLOCATION', payload={'term_code': term.code, 'run_id': run.id, 'results': results,
                                   'url': '/applications?' + urlencode({'term': term_id})}))
+        accepted = [result['section_id'] for result in results if result['status'] == 'ACCEPTED']
+        if accepted:
+            # Students with at least one admission get one confirmation for this allocation batch.
+            queue_registration_confirmation(db, term, sid, section_rows(db, accepted), 'ALLOCATION', run.id,
+                                            credit_limit=student_term(db, sid, term_id).credit_limit,
+                                            submitted_at=now(db), channel='ALLOCATION')
     # Use the actual final publication instant; all result rows become visible together at commit.
     run.published_at = now(db)
     audit(db, actor_user_id, term_id, 'ALLOCATION_PUBLISHED', 'allocation_run', run.id, run_dict(run))

@@ -4,7 +4,8 @@ from datetime import datetime, date, time, timedelta, timezone
 from uuid import uuid5, NAMESPACE_URL
 from decimal import Decimal
 from sqlalchemy import or_, select, text
-from .catalog_data import ADDITIONAL_TOPICS, COURSE_ALIASES, COURSE_GROUPS, DEPARTMENTS, SCHOOLS, normalize_name
+from .catalog_data import (ADDITIONAL_TOPICS, COURSE_ALIASES, COURSE_GROUPS, DEPARTMENTS, ENGLISH_ALIASES, SCHOOLS,
+                           normalize_name)
 from .config import settings
 from .db import SessionLocal
 from .models import (User, Department, Student, Instructor, Term, RegistrationPeriod, StudentTerm, Course,
@@ -17,6 +18,31 @@ from .registration import audit
 
 def uid(name):
     return str(uuid5(NAMESPACE_URL, 'ntust-course-demo/' + name))
+
+
+# Instructor sign-in accounts (FR-27) linked to the existing demo instructor records.
+TEACHERS = (('teacher01', 'chen', '示範授課教師 01'), ('teacher02', 'lin', '示範授課教師 02'),
+            ('teacher03', 'wang', '示範授課教師 03'), ('teacher04', 'huang', '示範授課教師 04'))
+# Teacher-demo timetable for student05 in the add-drop scenario: 15 credits without conflicts.
+# Adding CS101 A (back-to-back with CS201 A) reaches 18; CS302 A overlaps; CS303 A would be 21.
+FIFTEEN_CREDIT_DEMO = ('CS201', 'CS301', 'EE101', 'EE301', 'EE302')
+
+
+def seed_aliases(db, course_id, names):
+    for alias in {normalize_name(name) for name in names}:
+        add(db, CourseAlias, (course_id, alias), course_id=course_id, normalized_alias=alias)
+
+
+def seed_teacher_accounts(db, password):
+    for login, code, name in TEACHERS:
+        user_id = uid('user/' + login)
+        add(db, User, user_id, id=user_id, login=login, email=login + '@example.test', password_hash=password,
+            role='INSTRUCTOR', display_name=name)
+        instructor = db.get(Instructor, uid('teacher/' + code))
+        linked = db.scalar(select(Instructor.id).where(Instructor.user_id == user_id))
+        if instructor is not None and instructor.user_id is None and linked is None:
+            instructor.user_id = user_id
+    db.flush()
 
 
 def add(db, model, key, **values):
@@ -70,6 +96,7 @@ def seed_recommendation(db, current, department, *, main_only=False):
         course_id, topic_id = uid('course/' + code), uid('topic/' + topic)
         add(db, Course, course_id, id=course_id, code=code, title=title, description=description, department_id=department)
         add(db, CourseTopic, (course_id, topic_id), course_id=course_id, topic_id=topic_id)
+        seed_aliases(db, course_id, ENGLISH_ALIASES.get(code, ()))
 
     baseline = [('CS101', 1, '13:30', '16:30'), ('CS201', 4, '13:20', '16:20'),
                 ('CS302', 5, '13:30', '16:30')]
@@ -206,8 +233,7 @@ def seed_university_catalog(db, current, history, *, separate_term=False):
             for tag in tags:
                 topic_id = topic_ids[tag]
                 add(db, CourseTopic, (course_id, topic_id), course_id=course_id, topic_id=topic_id)
-            for alias in {normalize_name(name) for name in (code, title, *COURSE_ALIASES.get(code, ()))}:
-                add(db, CourseAlias, (course_id, alias), course_id=course_id, normalized_alias=alias)
+            seed_aliases(db, course_id, (code, title, *COURSE_ALIASES.get(code, ()), *ENGLISH_ALIASES.get(code, ())))
 
             for section_no in (('A', 'B') if code == 'NTU-EE-001' else ('A',)):
                 offerings.append((code, section_no, teacher_id, f'{school}-DEMO-{number:02d}'))
@@ -231,7 +257,8 @@ def seed_university_catalog(db, current, history, *, separate_term=False):
     return term_id
 
 
-def seed(mode='add-drop', *, recommendation_demo=False, university_demo=False, include_demo_terms=False):
+def seed(mode='add-drop', *, recommendation_demo=False, university_demo=False, include_demo_terms=False,
+         teacher_demo=False):
     current = datetime.now(timezone.utc)
     main_term_id = uid('term/main')
     initial_only = settings.public_initial_term_id == main_term_id
@@ -268,6 +295,8 @@ def seed(mode='add-drop', *, recommendation_demo=False, university_demo=False, i
             ('CS399', '人工智慧專題', cs, '專題研究班，本學期暫不開放選課。')]
         for code, title, dep, desc in courses:
             add(db, Course, uid('course/' + code), id=uid('course/' + code), code=code, title=title, department_id=dep, description=desc)
+            seed_aliases(db, uid('course/' + code), ENGLISH_ALIASES.get(code, ()))
+        seed_teacher_accounts(db, password)
         history = add(db, Term, uid('term/history'), id=uid('term/history'), code='114-2 歷史學期',
                       start_date=date(2026, 2, 1), end_date=date(2026, 6, 30), allocation_seed='history',
                       archived_at=current)
@@ -302,7 +331,8 @@ def seed(mode='add-drop', *, recommendation_demo=False, university_demo=False, i
                 db.flush()
             for n in range(1, 21):
                 sid = uid(f'student/student{n:02}')
-                add(db, StudentTerm, (sid, tid), student_id=sid, term_id=tid, credit_limit=Decimal('3.0') if n == 20 else Decimal('25.0'))
+                # Teacher specification: at most 18 credits; student20 keeps a lower personal limit.
+                add(db, StudentTerm, (sid, tid), student_id=sid, term_id=tid, credit_limit=Decimal('3.0') if n == 20 else Decimal('18.0'))
             sections = [
                 ('CS101', 'A', 'chen', 30, [(1, '09:00', '10:30', 'TR-211'), (3, '09:00', '10:30', 'TR-211')]),
                 ('CS101', 'B', 'lin', 30, [(2, '09:00', '12:00', 'TR-212')]),
@@ -327,6 +357,11 @@ def seed(mode='add-drop', *, recommendation_demo=False, university_demo=False, i
                 if scenario == 'add-drop':
                     db.add(AllocationRun(id=uid('run/' + slug), term_id=tid, algorithm_version='v1', seed=term.allocation_seed,
                                          published_at=current - timedelta(days=1), accepted_count=0, rejected_count=0))
+                    if teacher_demo and slug == 'main':
+                        for ccode in FIFTEEN_CREDIT_DEMO:
+                            db.add(Enrollment(id=uid(f'enrollment/{slug}/student05/{ccode}'), student_id=uid('student/student05'),
+                                              term_id=tid, course_id=uid('course/' + ccode),
+                                              section_id=uid(f'section/{slug}/{ccode}/A'), status='ENROLLED', source='INITIAL'))
                 if scenario in ('awaiting', 'short'):
                     for n in (1, 2):
                         db.add(Application(id=uid(f'application/{slug}/{n}'), student_id=uid(f'student/student{n:02}'),
@@ -353,4 +388,4 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--scenario', choices=['initial', 'awaiting', 'add-drop', 'short'],
                         default='initial' if settings.public_initial_term_id == uid('term/main') else 'add-drop')
-    print(seed(parser.parse_args().scenario, recommendation_demo=True, university_demo=True))
+    print(seed(parser.parse_args().scenario, recommendation_demo=True, university_demo=True, teacher_demo=True))

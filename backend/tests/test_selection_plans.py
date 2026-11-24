@@ -108,14 +108,15 @@ def test_at14_prerequisites_credits_unselectable_and_all_meetings(client, monkey
 
     signin(client, 'student02')
     monkeypatch.setattr(settings, 'chat_stub', False)
-    monkeypatch.setattr(settings, 'gemini_api_key', 'fake-for-structured-plan')
+    monkeypatch.setattr(settings, 'llama_base_url', 'http://192.0.2.10:11434')
 
     async def intent(*args, **kwargs):
-        return '''{"mode":"recommendation","tool":"recommend","topic":"LLM",
-            "available_times":[{"weekday":2,"start_time":"08:00","end_time":"18:00"}]}'''
+        return {'tool': 'recommend', 'topic': '大語言模型',
+                'available_times': [{'weekday': 2, 'start_time': '08:00', 'end_time': '18:00'}]}
 
-    monkeypatch.setattr(chat, 'generate_content', intent)
-    restricted = ask(client)['recommendation']
+    monkeypatch.setattr(chat, 'request_plan', intent)
+    # The time window must be the student's own words; the planner drops days or hours not said.
+    restricted = ask(client, message=TOPIC + '只排週二 8:00 到 18:00。')['recommendation']
     result_by_code = {item['course_code']: item for item in restricted['candidates']}
     assert result_by_code['DEMO-504']['reason_code'] == 'TIME_PREFERENCE_MISMATCH'
     assert len(result_by_code['DEMO-504']['meetings']) == 2
@@ -137,7 +138,8 @@ def test_at15_only_confirmed_subset_writes_and_initial_goes_to_allocation(client
     assert response.json()['phase'] == phase and response.json()['items'] == [
         {'section_id': section_id, 'status': status} for section_id in selected
     ]
-    increments = (0, 2, 2, 0, 1) if phase == 'ADD_DROP' else (2, 0, 2, 0, 1)
+    # FR-24: one confirmation email for a confirmed add/drop draft, none for pending initial registrations.
+    increments = (0, 2, 2, 1, 1) if phase == 'ADD_DROP' else (2, 0, 2, 0, 1)
     assert row_counts(term) == tuple(count + diff for count, diff in zip(before, increments))
     assert get_status(plan) == 'SUBMITTED'
     timetable = client.get(f'/api/v1/me/terms/{term}/timetable').json()
@@ -248,7 +250,7 @@ def test_at17_competing_batches_with_opposite_input_order_preserve_capacity():
         for section_id in ordered:
             assert db.scalar(select(func.count()).select_from(Enrollment).where(
                 Enrollment.section_id == section_id, Enrollment.status == 'ENROLLED')) == 1
-    assert row_counts(ADD_DROP)[3:] == (0, 1)
+    assert row_counts(ADD_DROP)[3:] == (1, 1)  # only the successful batch queues a confirmation
 
 
 def test_at18_rejects_expired_closed_and_outside_draft_without_writes(client, monkeypatch):

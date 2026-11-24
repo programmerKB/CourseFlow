@@ -48,7 +48,7 @@ def test_fresh_seed_publishes_full_catalog_only_in_main(client, monkeypatch, pub
         assert {code for code in courses if code.startswith('DEMO-')} == {f'DEMO-{n}' for n in range(501, 506)}
         assert courses.count('CS101') == 2
         # Adding recommendation sections cannot overwrite a student's main-term limit or enroll them.
-        assert db.get(StudentTerm, (uid('student/student01'), MAIN)).credit_limit == 25
+        assert db.get(StudentTerm, (uid('student/student01'), MAIN)).credit_limit == 18
         assert db.scalar(select(Enrollment).where(Enrollment.student_id == uid('student/student01'))) is None
 
     assert [row['id'] for row in client.get('/api/v1/terms').json()] == [MAIN]
@@ -89,12 +89,12 @@ def test_archived_terms_are_unavailable_to_active_views_and_routes(client):
     ('initial', 'INITIAL', '請試排這個方向的本期課程。', 'PENDING', 'pending_items'),
     ('add-drop', 'ADD_DROP', '請幫我自動選課。', 'ENROLLED', 'items'),
 ])
-def test_roadmap_follow_up_selects_current_courses_with_gemini_enabled(
+def test_roadmap_follow_up_selects_current_courses_with_local_model(
         client, monkeypatch, scenario, phase, follow_up, status, timetable_group):
     empty_database()
     monkeypatch.setattr(settings, 'public_initial_term_id', MAIN if phase == 'INITIAL' else '')
     monkeypatch.setattr(settings, 'chat_stub', False)
-    monkeypatch.setattr(settings, 'gemini_api_key', 'test-key-no-network')
+    monkeypatch.setattr(settings, 'llama_base_url', 'http://192.0.2.10:11434')
     monkeypatch.setattr(reg, 'now', lambda db: datetime.now(timezone.utc))
     seed(scenario, recommendation_demo=True, university_demo=True)
     signin(client)
@@ -106,14 +106,14 @@ def test_roadmap_follow_up_selects_current_courses_with_gemini_enabled(
     async def intent(message, **kwargs):
         model_messages.append(message)
         if message == question:
-            return '{"mode":"recommendation","tool":"recommend","track_code":"embedded_systems"}'
+            return {'tool': 'recommend', 'topic': '嵌入式系統', 'track_code': 'embedded_systems'}
         if message == constraint:
             assert '"selected_track_code": "embedded_systems"' in kwargs['system_instruction']
-            return ('{"mode":"recommendation","tool":"recommend","school_code":"NTUST","target_count":1,'
-                    '"available_times":[{"weekday":2,"start_time":"15:00","end_time":"18:00"}]}')
-        return '{"mode":"clarify","tool":"clarify"}'
+            return {'tool': 'recommend', 'school_code': 'NTUST', 'target_count': 1,
+                    'available_times': [{'weekday': 2, 'start_time': '15:00', 'end_time': '18:00'}]}
+        return {'tool': 'clarify'}
 
-    monkeypatch.setattr(chat, 'generate_content', intent)
+    monkeypatch.setattr(chat, 'request_plan', intent)
     consult = client.post('/api/v1/chat', json={'term_id': MAIN, 'message': question})
     assert consult.status_code == 200, consult.text
     advice = consult.json()['recommendation']

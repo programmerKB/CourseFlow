@@ -37,7 +37,7 @@ test("訪客查課、學生加退選、課表、初選登記與助理", async ({
     .getByRole("dialog")
     .getByRole("button", { name: "確認提交" })
     .click();
-  await expect(page.getByRole("alert")).toContainText("加選成功");
+  await expect(page.getByRole("alert")).toContainText("選課成功，確認信已排入寄送");
   await page.getByRole("button", { name: "關閉訊息" }).click();
   await page.getByRole("button", { name: "我的課表", exact: true }).click();
   await expect(page.locator(".class-block")).toHaveCount(2);

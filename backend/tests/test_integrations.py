@@ -42,23 +42,23 @@ def test_public_database_role_is_readonly():
             c.execute(text('UPDATE sections SET capacity=100'))
 
 
-def test_at11_no_key_and_provider_timeout(client,monkeypatch):
+def test_at11_no_model_and_model_timeout(client,monkeypatch):
     signin(client)
     monkeypatch.setattr(settings,'chat_stub',False)
-    monkeypatch.setattr(settings,'gemini_api_key','')
+    monkeypatch.setattr(settings,'llama_base_url','')
     r=client.post('/api/v1/chat',json={'message':'你好','term_id':MAIN})
     assert r.status_code == 503 and r.json()['code'] == 'CHAT_UNAVAILABLE'
-    assert r.json()['details']['reason_code'] == 'GEMINI_NOT_CONFIGURED'
+    assert r.json()['details']['reason_code'] == 'LLAMA_NOT_CONFIGURED'
     assert '尚未設定' in r.json()['message']
     assert client.get(f'/api/v1/terms/{MAIN}/sections').status_code == 200
-    monkeypatch.setattr(settings,'gemini_api_key','test-fake-only')
+    monkeypatch.setattr(settings,'llama_base_url','http://192.0.2.10:11434')
     async def timed_out(*args, **kwargs):
         raise TimeoutError('test')
 
-    monkeypatch.setattr(chat, 'generate_content', timed_out)
+    monkeypatch.setattr(chat, 'request_plan', timed_out)
     response = client.post('/api/v1/chat', json={'message': '你好', 'term_id': MAIN})
     assert response.status_code == 503
-    assert response.json()['details']['reason_code'] == 'GEMINI_TIMEOUT'
+    assert response.json()['details']['reason_code'] == 'LLAMA_TIMEOUT'
 
 
 def enqueue():
@@ -109,13 +109,13 @@ def test_outbox_lease_tokens_and_attempt_limit():
 def test_pii_redacted_before_model(client,monkeypatch):
     signin(client)
     monkeypatch.setattr(settings,'chat_stub',False)
-    monkeypatch.setattr(settings,'gemini_api_key','test-fake-only')
+    monkeypatch.setattr(settings,'llama_base_url','http://192.0.2.10:11434')
     captured=[]
-    async def capture(message, *, system_instruction, response_schema):
+    async def capture(message, *, system_instruction, meta):
         captured.extend([system_instruction, message])
-        return '{"tool":"rules"}'
+        return {'tool': 'rules'}
 
-    monkeypatch.setattr(chat, 'generate_content', capture)
+    monkeypatch.setattr(chat, 'request_plan', capture)
     r=client.post('/api/v1/chat',json={'message':'我是 student01 student01@example.test，學號 B11500001，密碼=demo-secret Bearer token-secret，請問初選規則','term_id':MAIN})
     assert r.status_code == 200 and captured
     content=' '.join(captured)

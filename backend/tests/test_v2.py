@@ -1,17 +1,16 @@
 """V2 acceptance regressions against PostgreSQL and real audio decoding."""
 import asyncio
-import base64
+from array import array
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
-import json
+import logging
 from shutil import which
 import subprocess
 from threading import Barrier
 import wave
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -84,9 +83,9 @@ def test_at20_three_university_catalog_filters_and_sources(client):
     assert {c['school_code'] for c in query} == set(schools)
 
 
-def test_at21_text_enrollment_without_gemini_and_replay_after_window(client, monkeypatch):
+def test_at21_text_enrollment_without_model_and_replay_after_window(client, monkeypatch):
     monkeypatch.setattr(settings, 'chat_stub', False)
-    monkeypatch.setattr(settings, 'gemini_api_key', '')
+    monkeypatch.setattr(settings, 'llama_base_url', '')
     assert ask(client, '我要加選 NTUST-ET-001').status_code == 401
     signin(client)
     before = transaction_counts()
@@ -98,7 +97,8 @@ def test_at21_text_enrollment_without_gemini_and_replay_after_window(client, mon
     data = response.json()
     assert data['mode'] == 'add_course' and data['action']['section_id'] == section('NTUST-ET-001')
     assert data['action']['remaining'] == 0 and data['action']['total_credits'] == '3.0'
-    assert transaction_counts() == (before[0] + 1, before[1] + 1, *before[2:])
+    # One enrollment, one audit event and one Gmail confirmation event (FR-24), no draft.
+    assert transaction_counts() == (before[0] + 1, before[1] + 1, before[2] + 1, before[3])
     assert ask(client, '我要加選 ＮＴＵＳＴ－ＥＴ－００２ Ａ班', key='code').json()['mode'] == 'add_course'
     timetable = client.get(f'/api/v1/me/terms/{TERM}/timetable').json()
     assert {row['id'] for row in timetable['items']} == {section('NTUST-ET-001'), section('NTUST-ET-002')}
@@ -133,7 +133,7 @@ def test_at22_candidates_and_non_commands_preserve_timetable(client):
 def test_eligibility_question_remains_read_only_without_model(client, monkeypatch):
     signin(client)
     monkeypatch.setattr(settings, 'chat_stub', False)
-    monkeypatch.setattr(settings, 'gemini_api_key', '')
+    monkeypatch.setattr(settings, 'llama_base_url', '')
     for question in ('我可以加選資料庫設計嗎？', '這門課可以加選嗎？', '我不要加選資料庫設計'):
         response = ask(client, question)
         assert response.status_code == 200 and response.json()['mode'] == 'student_query'
@@ -308,33 +308,97 @@ def test_at25_malformed_silent_oversized_and_unavailable_voice(client, monkeypat
     assert transaction_counts() == (0, 0, 0, 0)
 
 
-def test_audio_provider_receives_wav_and_incomplete_response_cannot_write(client, monkeypatch, audio):
-    monkeypatch.setattr(settings, 'gemini_api_key', 'test-key')
-    monkeypatch.setattr(settings, 'gemini_audio_model', 'gemini-audio-fixture')
-    reasons = iter(('MAX_TOKENS', 'STOP'))
+class FakeSegment:
+    def __init__(self, text, avg_logprob=-0.2, compression_ratio=1.0, start=0.0, end=2.0):
+        self.text, self.avg_logprob, self.compression_ratio = text, avg_logprob, compression_ratio
+        self.start, self.end = start, end
 
-    async def send(self, request, *args, **kwargs):
-        assert request.url.host == 'generativelanguage.googleapis.com'
-        assert '/models/gemini-audio-fixture:generateContent' in request.url.path
-        payload = json.loads(request.content)
-        assert payload['generationConfig']['responseMimeType'] == 'application/json'
-        part = next(part['inlineData'] for content in payload['contents'] for part in content['parts'] if 'inlineData' in part)
-        assert part['mimeType'] == 'audio/wav'
-        with wave.open(BytesIO(base64.urlsafe_b64decode(part['data']))) as wav:
-            assert wav.getframerate() == 16000 and wav.getnchannels() == 1
-        return httpx.Response(200, request=request, json={'candidates': [{
-            'finishReason': next(reasons), 'content': {'parts': [{'text': json.dumps({
-                'status': 'CLEAR', 'transcript': '幫我加選 NTUST-ET-001',
-            })}]},
-        }]})
 
-    monkeypatch.setattr(httpx.AsyncClient, 'send', send)
+class FakeWhisper:
+    """Stands in for faster_whisper.WhisperModel and records what it was given."""
+
+    def __init__(self, *results):
+        self.results, self.calls = iter(results), []
+
+    def transcribe(self, samples, **options):
+        self.calls.append((samples, options))
+        return iter(next(self.results)), None
+
+
+def wav_bytes(seconds=1.0, amplitude=8000):
+    frames = array('h', [amplitude if (index // 40) % 2 else -amplitude for index in range(int(16000 * seconds))])
+    buffer = BytesIO()
+    with wave.open(buffer, 'wb') as audio_file:
+        audio_file.setnchannels(1)
+        audio_file.setsampwidth(2)
+        audio_file.setframerate(16000)
+        audio_file.writeframes(frames.tobytes())
+    return buffer.getvalue()
+
+
+def test_local_whisper_transcription_status_and_traditional_text(monkeypatch):
+    model = FakeWhisper([FakeSegment('帮我加选 CS101 A 班')], [FakeSegment('我要加選', avg_logprob=-1.4)], [],
+                        [FakeSegment('常見用語：加選、退選')], [FakeSegment('哈哈哈哈哈哈', compression_ratio=3.1)])
+    monkeypatch.setattr(voice, 'load_model', lambda: model)
+    results = [voice.run_whisper(wav_bytes(1.5)) for _ in range(5)]
+    assert [(r.status, r.transcript) for r in results] == [
+        ('CLEAR', '幫我加選 CS101 A 班'), ('UNCLEAR', '我要加選'), ('SILENT', ''),
+        ('UNCLEAR', '常見用語：加選、退選'), ('UNCLEAR', '哈哈哈哈哈哈')]
+    samples, options = model.calls[0]
+    assert samples.dtype.name == 'float32' and len(samples) == 24000 and abs(samples).max() <= 1.0
+    assert options['language'] == 'zh' and options['vad_filter'] is True and options['temperature'] == 0
+    assert '繁體中文' in options['initial_prompt'] and 'CS101 A 班' in options['initial_prompt']
+
+
+def test_speech_punctuation_parses_like_typed_commands():
+    from app.chat_enrollment import parse_command
+    typed = parse_command('我想要加選，CS101 A班。')
+    assert parse_command('我想要加選、CS101 A 班。') == typed and (typed.target, typed.section_no) == ('cs101', 'a')
+    assert parse_command('我要加選 CS101 01 班').section_no == '01'
+    assert parse_command('我要加選、CS101、CS201').target == ''  # still two courses: ask for one
+
+
+def test_whisper_receives_recording_and_low_confidence_cannot_write(client, monkeypatch, audio, caplog):
+    model = FakeWhisper([FakeSegment('帮我加选 NTUST-ET-001', avg_logprob=-1.7)], [FakeSegment('帮我加选 NTUST-ET-001')])
+    monkeypatch.setattr(voice, 'load_model', lambda: model)
     signin(client)
-    response = voice_request(client, audio, key='provider-incomplete')
-    assert response.status_code == 503 and response.json()['code'] == 'VOICE_UNAVAILABLE'
+    response = voice_request(client, audio, key='whisper-unclear')
+    assert response.status_code == 422 and response.json()['details']['transcript_status'] == 'UNCLEAR'
     assert transaction_counts() == (0, 0, 0, 0)
-    response = voice_request(client, audio, key='provider-complete')
+    response = voice_request(client, audio, key='whisper-clear')
     assert response.status_code == 200 and response.json()['action']['section_id'] == section('NTUST-ET-001')
+    # The replayable response keeps the canonical command; Whisper's Simplified text was converted first.
+    assert '高等計算機結構' in response.json()['transcript'] and '加选' not in response.json()['transcript']
+    samples, _ = model.calls[0]
+    assert samples.dtype.name == 'float32' and 0 < len(samples) / 16000 <= 20
+
+    def broken():
+        raise OSError('/opt/whisper/private/path is missing')
+
+    monkeypatch.setattr(voice, 'load_model', broken)
+    with caplog.at_level(logging.WARNING, logger='courses.voice'):
+        response = voice_request(client, audio, key='whisper-missing')
+    assert response.status_code == 503 and response.json()['code'] == 'VOICE_UNAVAILABLE'
+    assert 'error_class=OSError' in caplog.text and '/opt/whisper/private' not in caplog.text
+
+
+def test_model_timeout_after_speech_keeps_the_transcript(client, monkeypatch, audio):
+    from app import chat
+
+    async def transcribe(_wav):
+        return voice.Transcript(status='CLEAR', transcript='我想做晶片設計，該修什麼課？')
+
+    async def slow_model(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(voice, 'transcribe', transcribe)
+    monkeypatch.setattr(chat, 'handle_chat', slow_model)
+    signin(client)
+    response = voice_request(client, audio, key='voice-model-timeout')
+    assert response.status_code == 503 and response.json()['code'] == 'CHAT_UNAVAILABLE'
+    details = response.json()['details']
+    assert details['reason_code'] == 'LLAMA_TIMEOUT' and details['transcript'] == '我想做晶片設計，該修什麼課？'
+    assert transaction_counts() == (0, 0, 0, 0)
 
 
 def test_at26_voice_text_manual_compete_for_one_seat(monkeypatch, audio):
@@ -367,13 +431,14 @@ def test_at26_voice_text_manual_compete_for_one_seat(monkeypatch, audio):
         responses = list(pool.map(compete, range(3)))
     assert sum(r.status_code in (200, 201) for r in responses) == 1
     assert [r.json()['code'] for r in responses if r.status_code == 409] == ['SECTION_FULL', 'SECTION_FULL']
-    assert transaction_counts() == (1, 1, 0, 0)
+    # FR-24: the single winning addition queues one confirmation email.
+    assert transaction_counts() == (1, 1, 1, 0)
 
 
 def test_at32_all_stages_aliases_and_targeted_clarification(client, monkeypatch):
     signin(client)
     monkeypatch.setattr(settings, 'chat_stub', False)
-    monkeypatch.setattr(settings, 'gemini_api_key', '')
+    monkeypatch.setattr(settings, 'llama_base_url', '')
     for code, track in TRACKS.items():
         for query in (track.title, track.aliases[0]):
             response = ask(client, query)

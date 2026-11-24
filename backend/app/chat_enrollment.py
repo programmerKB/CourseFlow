@@ -20,11 +20,13 @@ from .models import Course, CourseAlias, Department, School, Section
 
 COMMAND = re.compile(
     r'^(?:我(?:要|想(?:要)?)|請(?:幫我)?|幫我|麻煩(?:幫我)?)\s*'
-    r'(?P<action>加選|登記初選|初選登記|登記)\s*[:,]?\s*(?P<target>.*)$'
+    # Speech transcripts often put an ideographic comma right after the verb: 「我想要加選、CS101 A 班」.
+    r'(?P<action>加選|登記初選|初選登記|登記)\s*[:,、]?\s*(?P<target>.*)$'
 )
 AMBIGUOUS = re.compile(r'["\'「」『』“”‘’?,，、;；\n]|(?:可以|能不能|可不可以|是否|不要|不用|不想|不必|別加選|取消|退選|和幫我|以及|然後|還有)|(?:嗎|呢|好嗎|行嗎)$')
-# Accept a separated class number or the common unseparated "A班" or "01班".
-CLASS_NUMBER = re.compile(r'(?:第([^第()]{1,32})班|班號\s*([a-z0-9_-]{1,32})|[\s(]+([a-z0-9_-]{1,32})班\)?|([a-z]|\d{1,8})班)$')
+# Accept a separated class number or the common unseparated "A班" or "01班". Speech
+# transcripts may also put a space before 班 ("CS101 A 班").
+CLASS_NUMBER = re.compile(r'(?:第([^第()]{1,32})班|班號\s*([a-z0-9_-]{1,32})|[\s(]+([a-z0-9_-]{1,32})\s*班\)?|([a-z]|\d{1,8})\s*班)$')
 
 
 @dataclass(frozen=True)
@@ -172,7 +174,8 @@ def handle_command(user, command, term_id, request_key, digest, request_id, chan
                 return clarification(db, message, request_id, term, candidates)
 
             try:
-                enrollment, section, credits = reg.add_enrollment(db, term, st, section_id, user['id'], channel=channel)
+                enrollment, section, credits, notification_id = reg.add_enrollment(
+                    db, term, st, section_id, user['id'], channel=channel)
             except DomainError as error:
                 details = {**(error.details or {}), 'section_id': section_id,
                            'sources': [source(term_id, section_id, '查看班別與選課入口')]}
@@ -180,7 +183,7 @@ def handle_command(user, command, term_id, request_key, digest, request_id, chan
             submitted_at = reg.now(db)
             description = f'{section["school_name"]} {section["department_name"]} 的 {section["title"]} {section["section_no"]} 班'
             response = jsonable_encoder({
-                'mode': 'add_course', 'answer': f'已加選 {description}。', 'as_of': submitted_at, 'request_id': request_id,
+                'mode': 'add_course', 'answer': f'已加選 {description}。選課確認信已排入寄送。', 'as_of': submitted_at, 'request_id': request_id,
                 'sources': [source(term_id, section_id, section['title']),
                             source(term_id, title='我的課表', url='/timetable?' + urlencode({'term': term_id}))],
                 'action': {
@@ -189,6 +192,7 @@ def handle_command(user, command, term_id, request_key, digest, request_id, chan
                     'department_name': section['department_name'], 'course_title': section['title'],
                     'section_no': section['section_no'], 'total_credits': str(credits),
                     'remaining': section['remaining'], 'submitted_at': submitted_at,
+                    'course_code': section['code'], 'notification_id': notification_id,
                 },
                 **({'transcript': f'我要加選 {description}', 'transcript_status': 'CLEAR'} if channel == 'CHAT_VOICE' else {}),
             })

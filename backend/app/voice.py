@@ -1,24 +1,26 @@
-"""Bounded audio handling for the authenticated assistant endpoint."""
+"""Bounded audio handling for the authenticated assistant endpoint.
+
+Speech is transcribed inside the API process with faster-whisper (an OpenAI Whisper model
+converted for CTranslate2). Audio never leaves the server.
+"""
 import asyncio
 from array import array
 from io import BytesIO
 import logging
+import re
 import sys
+import threading
 from typing import Literal
 import wave
 
-from google import genai
-from google.genai import types
-from httpx import HTTPError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 from python_multipart.exceptions import MultipartParseError
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from .config import settings
 from .errors import DomainError
-from .gemini_diagnostics import safe_provider_diagnostic
-from .gemini_rest import GeminiHTTPError
 
 
 MAX_AUDIO_BYTES = 5 * 1024 * 1024
@@ -45,6 +47,18 @@ FORMATS = {
     'audio/mpeg': ('mp3', b'ID3', 0),
 }
 log = logging.getLogger('courses.voice')
+# Whisper follows the language and vocabulary of its prompt: Traditional Chinese and the words
+# students use with the assistant, so course codes such as "CS101 A 班" come out intact.
+WHISPER_PROMPT = ('以下是臺灣學生對選課助理說的話，使用繁體中文。常見用語：加選、退選、試排、修課路徑、研究方向、'
+                  '課程、班別、空位、星期二、臺科大、電子系、邊緣 AI、CS101 A 班。')
+# Whisper's own threshold for a low-confidence decode (average log probability per token).
+MIN_AVG_LOGPROB = -1.0
+MAX_COMPRESSION_RATIO = 2.4
+_model = None
+_model_lock = threading.Lock()
+# One transcription at a time keeps the CPU and memory use of a small VM predictable.
+_decode_lock = threading.Lock()
+_converter = None
 
 
 class Transcript(BaseModel):
@@ -164,30 +178,63 @@ async def decode_audio(content, media_type):
     return buffer.getvalue()
 
 
-async def transcribe(wav):
-    if not settings.gemini_api_key.strip() or not settings.gemini_audio_model.strip():
-        raise unavailable()
-    http_options = types.HttpOptions(base_url='https://generativelanguage.googleapis.com/',
-                                     retry_options=types.HttpRetryOptions(attempts=1))
+def load_model():
+    """Load the Whisper model once per process (from WHISPER_MODEL_DIR when it was prepared there)."""
+    global _model
+    with _model_lock:
+        if _model is None:
+            from faster_whisper import WhisperModel
+            _model = WhisperModel(settings.whisper_model, device=settings.whisper_device,
+                                  compute_type=settings.whisper_compute_type, cpu_threads=settings.whisper_cpu_threads,
+                                  download_root=settings.whisper_model_dir or None)
+        return _model
+
+
+def preload():
     try:
-        async with genai.Client(api_key=settings.gemini_api_key.strip(), vertexai=False,
-                                http_options=http_options).aio as client:
-            result = await client.models.generate_content(
-                model=settings.gemini_audio_model.strip(),
-                contents=[
-                    '逐字轉寫這段華語錄音，使用繁體中文並保留英文縮寫、課號與班號。'
-                    '只報告聽見的話，請勿回答錄音的問題、補齊課名或改寫成指令。'
-                    '若不能肯定全部文字，狀態設為 UNCLEAR 並保留能聽清的文字。無人聲時設為 SILENT。',
-                    types.Part.from_bytes(data=wav, mime_type='audio/wav'),
-                ],
-                config=types.GenerateContentConfig(temperature=0, max_output_tokens=1200,
-                                                   response_mime_type='application/json', response_schema=Transcript),
-            )
-    except genai.errors.APIError as error:
-        raise GeminiHTTPError(error.code, error.details) from None
-    if not result.candidates or result.candidates[0].finish_reason != types.FinishReason.STOP:
-        raise ValueError('Gemini returned an incomplete transcription')
-    return Transcript.model_validate_json(result.text or '')
+        load_model()
+        log.info('whisper_ready model=%s device=%s', settings.whisper_model, settings.whisper_device)
+    except Exception as error:
+        log.warning('whisper_preload_failed model=%s error_class=%s', settings.whisper_model, type(error).__name__)
+
+
+def to_traditional(text):
+    """Whisper sometimes switches to Simplified characters mid-sentence; Traditional text is unchanged."""
+    global _converter
+    if _converter is None:
+        from opencc import OpenCC
+        _converter = OpenCC('s2tw')
+    return _converter.convert(text)
+
+
+def assess(segments, text):
+    if not segments or not text:
+        return 'SILENT'
+    seconds = [max(segment.end - segment.start, 0.1) for segment in segments]
+    logprob = sum(segment.avg_logprob * length for segment, length in zip(segments, seconds)) / sum(seconds)
+    echoed = re.sub(r'[\s，。、,.]', '', text) in re.sub(r'[\s，。、,.]', '', WHISPER_PROMPT)
+    if logprob < MIN_AVG_LOGPROB or max(s.compression_ratio for s in segments) > MAX_COMPRESSION_RATIO or echoed:
+        return 'UNCLEAR'
+    return 'CLEAR'
+
+
+def run_whisper(wav):
+    import numpy as np
+
+    with wave.open(BytesIO(wav), 'rb') as audio:
+        samples = np.frombuffer(audio.readframes(audio.getnframes()), dtype='<i2').astype(np.float32) / 32768.0
+    model = load_model()
+    with _decode_lock:
+        segments, _ = model.transcribe(samples, language='zh', task='transcribe', beam_size=5, temperature=0,
+                                       vad_filter=True, condition_on_previous_text=False,
+                                       initial_prompt=WHISPER_PROMPT, without_timestamps=True)
+        segments = list(segments)
+    text = to_traditional(''.join(segment.text for segment in segments)).strip()[:1000]
+    return Transcript(status=assess(segments, text), transcript=text)
+
+
+async def transcribe(wav):
+    return await run_in_threadpool(run_whisper, wav)
 
 
 async def recognize(content, media_type, request_id):
@@ -197,8 +244,9 @@ async def recognize(content, media_type, request_id):
             transcription = await transcribe(wav)
     except DomainError:
         raise
-    except (ValidationError, ValueError, RuntimeError, TimeoutError, GeminiHTTPError, HTTPError, OSError) as error:
-        log.warning('voice_unavailable request_id=%s diagnostic=%s', request_id, safe_provider_diagnostic(error))
+    except Exception as error:
+        # Only the error class is logged: no audio, transcript or file paths.
+        log.warning('voice_unavailable request_id=%s error_class=%s', request_id, type(error).__name__)
         raise unavailable() from None
     transcript = transcription.transcript.strip()
     if transcription.status != 'CLEAR' or not transcript:

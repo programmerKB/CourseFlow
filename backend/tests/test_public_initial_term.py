@@ -74,15 +74,15 @@ def test_scoped_term_accepts_initial_applications_and_disables_add_drop(client, 
     assert apply.status_code == 200 and apply.json()['status'] == 'PENDING'
 
 
-def test_department_advice_after_confirmation_uses_current_registrations_without_gemini(client, monkeypatch):
+def test_department_advice_after_confirmation_uses_current_registrations_without_model(client, monkeypatch):
     monkeypatch.setattr(settings, 'public_initial_term_id', MAIN)
     monkeypatch.setattr(settings, 'chat_stub', False)
-    monkeypatch.setattr(settings, 'gemini_api_key', '')
+    monkeypatch.setattr(settings, 'llama_base_url', '')
 
     async def unexpected(*args, **kwargs):
         raise AssertionError('This query must use the local database')
 
-    monkeypatch.setattr(chat, 'generate_content', unexpected)
+    monkeypatch.setattr(chat, 'request_plan', unexpected)
     with SessionLocal.begin() as db:
         period = db.get(RegistrationPeriod, (MAIN, 'INITIAL'))
         period.starts_at, period.ends_at = FIXED - timedelta(days=1), FIXED + timedelta(days=1)

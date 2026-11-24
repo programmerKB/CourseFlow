@@ -29,7 +29,7 @@ class User(Base):
     is_active = Column(Boolean, nullable=False, server_default=text('true'))
     display_name = Column(String(255), nullable=False)
     __table_args__ = (CheckConstraint("login = lower(btrim(login)) AND login <> ''", name='ck_login_normalized'),
-                      CheckConstraint("role IN ('STUDENT','ADMIN')", name='ck_user_role'))
+                      CheckConstraint("role IN ('STUDENT','INSTRUCTOR','ADMIN')", name='ck_user_role'))
 
 
 class AuthSession(Base):
@@ -70,6 +70,9 @@ class Instructor(Base):
     id = ident()
     name = Column(String(255), nullable=False)
     department_id = ref('departments')
+    # Optional sign-in account; demo instructors without one can still teach sections.
+    user_id = Column(UUID(as_uuid=False), ForeignKey('users.id', ondelete='RESTRICT', name='fk_instructor_user'),
+                     unique=True)
 
 
 class Term(Base):
@@ -99,7 +102,7 @@ class StudentTerm(Base):
     student_id = ref('students', primary_key=True)
     term_id = ref('terms', primary_key=True)
     credit_limit = Column(Numeric(4, 1), nullable=False)
-    __table_args__ = (CheckConstraint('credit_limit >= 0', name='ck_credit_limit'),)
+    __table_args__ = (CheckConstraint('credit_limit BETWEEN 0 AND 18', name='ck_credit_limit'),)
 
 
 class Course(Base):
@@ -153,7 +156,8 @@ class Section(Base):
     __table_args__ = (UniqueConstraint('term_id', 'course_id', 'section_no', name='uq_section_number'),
                       UniqueConstraint('id', 'term_id', 'course_id', name='uq_section_identity'),
                       CheckConstraint('credits > 0', name='ck_section_credits'),
-                      CheckConstraint('capacity >= 0', name='ck_section_capacity'), Index('ix_sections_term', 'term_id'))
+                      CheckConstraint('capacity >= 0', name='ck_section_capacity'), Index('ix_sections_term', 'term_id'),
+                      Index('ix_sections_instructor_term', 'instructor_id', 'term_id'))
 
 
 class SectionMeeting(Base):
@@ -317,6 +321,19 @@ class NotificationOutbox(Base):
     claim_token = Column(UUID(as_uuid=False))
     sent_at = Column(DateTime(timezone=True))
     last_error = Column(Text)
+    provider_message_id = Column(String(255))
     __table_args__ = (CheckConstraint("status IN ('PENDING','PROCESSING','SENT','FAILED')", name='ck_outbox_status'),
                       CheckConstraint('attempt_count BETWEEN 0 AND 3', name='ck_outbox_attempts'),
                       Index('ix_outbox_poll', 'status', 'next_attempt_at'))
+
+
+class Grade(Base):
+    """Current score for one enrollment; the change history lives in audit_events."""
+    __tablename__ = 'grades'
+    enrollment_id = Column(UUID(as_uuid=False), ForeignKey('enrollments.id', ondelete='RESTRICT'), primary_key=True)
+    score = Column(Numeric(5, 2), nullable=False)
+    graded_by_user_id = ref('users')
+    created_at = stamp()
+    updated_at = stamp()
+    __table_args__ = (CheckConstraint('score BETWEEN 0 AND 100', name='ck_grade_score'),
+                      CheckConstraint('created_at <= updated_at', name='ck_grade_times'))

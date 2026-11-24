@@ -93,7 +93,7 @@ def test_smtp_quit_failure_preserves_acceptance_and_old_term_link(job, monkeypat
     job['payload']['url'] = '/timetable'
     monkeypatch.setattr(worker, 'claim_one', lambda: job)
     completed = []
-    monkeypatch.setattr(worker, 'finish', lambda _, error: completed.append(error) or True)
+    monkeypatch.setattr(worker, 'finish', lambda _, error, *provider: completed.append(error) or True)
     assert worker.process_one()
     assert completed == [None]
     assert '/timetable?term=example-term' in smtp.message.get_content()

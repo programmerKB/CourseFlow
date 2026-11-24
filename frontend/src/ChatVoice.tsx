@@ -211,7 +211,7 @@ export default function ChatVoice({
           <button type="button" onClick={cancel}>{clip?.fileName ? "取消音檔" : "取消錄音"}</button>
         </>
       )}
-      <small>每段最多 20 秒、5 MiB。送出後由 Gemini 轉寫。</small>
+      <small>每段最多 20 秒、5 MiB。送出後在本系統伺服器以 Whisper 轉寫，錄音不會傳到外部服務。</small>
       {error && <p className="error" role="alert">{error}</p>}
     </div>
   );
