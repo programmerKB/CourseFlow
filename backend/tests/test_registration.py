@@ -243,7 +243,9 @@ def test_personal_isolation_and_drop_replay(client):
     assert client.delete(path, headers={'Idempotency-Key':'drop-key'}).status_code == 204
     assert count(NotificationOutbox) == before
     assert add(client, sec('CS101')).status_code == 201
-    assert count(NotificationOutbox) == 0
+    # FR-24: each successful add queues one Gmail confirmation; drops and their replays queue none.
+    with SessionLocal() as db:
+        assert [n.type for n in db.scalars(select(NotificationOutbox))] == ['REGISTRATION_CONFIRMATION'] * 2
 
 
 def test_seed_preserves_existing_records(client):

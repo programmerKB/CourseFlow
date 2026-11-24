@@ -47,6 +47,8 @@ if action == 'run' and options[-3:] == ['https', 'nginx', '-t'] and failure == '
     sys.exit(11)
 if action == 'exec' and any('http://frontend/api/v1/terms' in value for value in options) and failure == 'http':
     sys.exit(1)
+if action == 'exec' and 'app.verify_llama' in options and failure == 'llama':
+    sys.exit(1)
 if action == 'ps':
     if '--quiet' in options:
         print(options[-1] + '-container')
@@ -165,6 +167,29 @@ class DeployTests(unittest.TestCase):
         stop = next(i for i, call in enumerate(calls) if 'stop' in call)
         self.assertLess(validate, stop)
         self.assertTrue(any('up' in call and call[-1] == 'https' for call in self.calls()))
+
+    def test_llm_profile_starts_ollama_and_pulls_model_before_migration(self):
+        result = self.run_deploy('--skip-seed', '--llm')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        config = next(call for call in calls if 'config' in call)
+        self.assertEqual(config[config.index('--profile') + 1], 'llm')
+        start = next(i for i, call in enumerate(calls) if 'up' in call and call[-1] == 'ollama')
+        pull = next(i for i, call in enumerate(calls) if 'exec' in call and 'ollama pull "$LLAMA_MODEL"' in call)
+        migration = next(i for i, call in enumerate(calls) if 'run' in call and 'migrate' in call)
+        self.assertLess(start, pull)
+        self.assertLess(pull, migration)
+
+    def test_unreachable_llama_only_warns_after_the_app_is_up(self):
+        result = self.run_deploy('--skip-seed', failure='llama')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('部署完成。', result.stdout)
+        self.assertIn('連不到 Llama 模型服務', result.stderr)
+        calls = self.calls()
+        check = next(i for i, call in enumerate(calls) if 'app.verify_llama' in call)
+        frontend = next(i for i, call in enumerate(calls) if 'up' in call and 'frontend' in call)
+        self.assertLess(frontend, check)
+        self.assertIn('--server-only', calls[check])
 
     def test_missing_tls_files_fail_before_restarting_services(self):
         result = self.run_deploy('--https')

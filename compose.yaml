@@ -1,6 +1,10 @@
 name: course-registration
 x-backend: &backend
-  build: ./backend
+  build:
+    context: ./backend
+    args:
+      # Whisper model bundled into the image for voice input (base needs about 400 MB of memory).
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
   environment: &backend-env
     DATABASE_URL: postgresql+psycopg://course_app@db:5432/courses
     DATABASE_PASSWORD: ${APP_DB_PASSWORD:-course_app}
@@ -12,9 +16,6 @@ x-backend: &backend
     PUBLIC_INITIAL_TERM_ID: ${PUBLIC_INITIAL_TERM_ID-8abc15dd-c1b8-53ed-a570-ae723e17a762}
     INITIAL_START_AT: ${INITIAL_START_AT:-}
     INITIAL_END_AT: ${INITIAL_END_AT:-}
-    GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
-    GEMINI_AUDIO_MODEL: ${GEMINI_AUDIO_MODEL:-gemini-3.5-flash-lite}
-    GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     CHAT_STUB: ${CHAT_STUB:-false}
     SMTP_HOST: ${SMTP_HOST:-mailpit}
     SMTP_PORT: ${SMTP_PORT:-1025}
@@ -22,6 +23,22 @@ x-backend: &backend
     SMTP_PASSWORD: ${SMTP_PASSWORD:-}
     SMTP_FROM: ${SMTP_FROM:-courses@example.test}
     SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+    # Both assistants use the local Llama 3.2 3B (the ollama service below, Ollama on the Windows
+    # host, or any compatible endpoint). No cloud language model is used.
+    LLAMA_BASE_URL: ${LLAMA_BASE_URL-http://ollama:11434}
+    LLAMA_API_STYLE: ${LLAMA_API_STYLE:-ollama}
+    LLAMA_MODEL: ${LLAMA_MODEL:-llama3.2:3b}
+    LLAMA_API_KEY: ${LLAMA_API_KEY:-}
+    LLAMA_TIMEOUT_SECONDS: ${LLAMA_TIMEOUT_SECONDS:-45}
+    # Voice input: faster-whisper inside the API container (model chosen at build time above).
+    WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-2}
+    WHISPER_PRELOAD: ${WHISPER_PRELOAD:-true}
+    # Registration confirmations are sent with the Gmail API (OAuth refresh token, gmail.send scope).
+    GMAIL_TRANSPORT: ${GMAIL_TRANSPORT:-api}
+    GMAIL_CLIENT_ID: ${GMAIL_CLIENT_ID:-}
+    GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:-}
+    GMAIL_REFRESH_TOKEN: ${GMAIL_REFRESH_TOKEN:-}
+    GMAIL_SENDER: ${GMAIL_SENDER:-}
   depends_on:
     migrate:
       condition: service_completed_successfully
@@ -104,9 +121,24 @@ services:
         condition: service_completed_successfully
       mailpit:
         condition: service_started
+  ollama:
+    # Optional local model server: ./deploy.sh --llm (or COMPOSE_PROFILES=llm) pulls LLAMA_MODEL.
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.6.8}
+    profiles: ["llm"]
+    environment:
+      LLAMA_MODEL: ${LLAMA_MODEL:-llama3.2:3b}
+      OLLAMA_KEEP_ALIVE: 30m
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
   mailpit:
     image: axllent/mailpit:v1.27.8
     ports:
       - "127.0.0.1:${MAILPIT_PORT:-8025}:8025"
 volumes:
   course_db:
+  ollama_models:

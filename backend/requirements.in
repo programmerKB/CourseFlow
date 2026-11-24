@@ -7,7 +7,12 @@ alembic==1.14.0
 pydantic-settings==2.7.0
 argon2-cffi==23.1.0
 langchain-core==1.8.4
-langchain-google-genai==4.0.0
 langgraph==1.0.4
 httpx==0.28.1
+# Speech-to-text runs locally (voice input). av is pinned because faster-whisper 1.2.1
+# uses an av.open() argument that PyAV 19 removed.
+faster-whisper==1.2.1
+ctranslate2==4.8.5
+av==16.0.1
+OpenCC==1.4.2
 pytest==8.3.4

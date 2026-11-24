@@ -32,12 +32,14 @@ import {
 } from "./api";
 import RecommendationCard from "./RecommendationCard";
 import ChatVoice from "./ChatVoice";
+import Teaching from "./Teaching";
 
 type View =
   | "courses"
   | "applications"
   | "timetable"
   | "chat"
+  | "teaching"
   | "admin"
   | "rules";
 type Mutation = (path: string, method: string, body?: unknown) => Promise<any>;
@@ -60,7 +62,7 @@ const NAV: { id: View; label: string; icon: string }[] = [
 ];
 const route = (): View => {
   const p = location.pathname.slice(1);
-  return ["applications", "timetable", "chat", "admin", "rules"].includes(p)
+  return ["applications", "timetable", "chat", "teaching", "admin", "rules"].includes(p)
     ? (p as View)
     : "courses";
 };
@@ -267,7 +269,13 @@ export default function App() {
     operations = useRef(new Set<string>());
   const term = terms.find((t) => t.id === termId),
     student = user?.role === "STUDENT",
+    instructor = user?.role === "INSTRUCTOR",
     admin = user?.role === "ADMIN";
+  const navItems: { id: View; label: string; icon: string }[] = instructor
+    ? [NAV[0], { id: "teaching", label: "我的授課", icon: "✎" }, NAV[NAV.length - 1]]
+    : [...NAV, ...(admin ? [{ id: "admin" as View, label: "教務管理", icon: "⚙" }] : [])];
+  const viewLabel =
+    view === "admin" ? "教務管理" : view === "teaching" ? "我的授課" : NAV.find((n) => n.id === view)?.label;
   const refresh = () => setRevision((x) => x + 1);
   function navigate(next: View) {
     setView(next);
@@ -585,6 +593,7 @@ export default function App() {
         </button>
       );
     if (admin) return <Badge>管理員檢視</Badge>;
+    if (instructor) return <Badge>教師檢視</Badge>;
     const isEnrolled = status ? status === "ENROLLED" : table?.items.some((t) => t.id === s.id),
       isPending = status ? status === "PENDING" : apps.some((a) => a.id === s.id && a.status === "PENDING");
     if (isEnrolled)
@@ -661,7 +670,7 @@ export default function App() {
           : action === "cancel"
             ? "已取消初選登記。"
             : action === "add"
-              ? "加選成功，正式課表已更新。"
+              ? "選課成功，確認信已排入寄送。正式課表已更新。"
               : "退選成功，名額已釋出。",
       );
     } catch (e) {
@@ -713,7 +722,7 @@ export default function App() {
         if (attempt.kind === "text") chatKeys.current.delete(attempt.signature);
         setMessages((m) => [...m, { role: "assistant", ...result,
           prompt: attempt.kind === "text" ? attempt.text : result.transcript }]);
-        if (result.action?.status === "ENROLLED") refresh();
+        if (result.action) refresh();
       }
     } catch (e) {
       if (control.signal.aborted) return;
@@ -730,6 +739,7 @@ export default function App() {
           sources: details?.sources,
           registration: details?.registration,
           transcript: details?.transcript,
+          agent: details?.agent,
           retry: retry ? attempt : undefined,
         },
       ]);
@@ -756,7 +766,7 @@ export default function App() {
   const privateGate = !student ? (
     <div className="state">
       <h3>
-        {admin ? "請以學生帳號查看個人選課資料" : "登入以查看你的選課資料"}
+        {admin || instructor ? "請以學生帳號查看個人選課資料" : "登入以查看你的選課資料"}
       </h3>
       <p>每位學生的登記、分發結果與正式課表分開保存。</p>
       <button className="primary" onClick={() => setLoginOpen(true)}>
@@ -785,12 +795,7 @@ export default function App() {
         </a>
         <p className="nav-caption">學期規劃 · 自主學習</p>
         <nav aria-label="主要導覽">
-          {[
-            ...NAV,
-            ...(admin
-              ? [{ id: "admin" as View, label: "教務管理", icon: "⚙" }]
-              : []),
-          ].map((n) => (
+          {navItems.map((n) => (
             <button
               key={n.id}
               className={view === n.id ? "active" : ""}
@@ -826,11 +831,7 @@ export default function App() {
         <header className="topbar">
           <div className="breadcrumb">
             學習工作台 <span>/</span>{" "}
-            <strong>
-              {view === "admin"
-                ? "教務管理"
-                : NAV.find((n) => n.id === view)?.label}
-            </strong>
+            <strong>{viewLabel}</strong>
           </div>
           <div className="top-actions">
             {terms.length > 1 ? (
@@ -862,7 +863,7 @@ export default function App() {
                 <span className="avatar">{user.display_name.slice(0, 1)}</span>
                 <span className="user-name">
                   {user.display_name}
-                  <small>{admin ? "教務管理員" : user.login}</small>
+                  <small>{admin ? "教務管理員" : instructor ? "授課教師" : user.login}</small>
                 </span>
                 <button className="small" onClick={logout} disabled={busy}>
                   登出
@@ -883,9 +884,7 @@ export default function App() {
             <div>
               <p className="eyebrow">YOUR SEMESTER, YOUR WAY</p>
               <h1>
-                {view === "admin"
-                  ? "教務管理"
-                  : NAV.find((n) => n.id === view)?.label}
+                {viewLabel}
                 <span>.</span>
               </h1>
               <p>
@@ -896,7 +895,9 @@ export default function App() {
                     : view === "timetable"
                       ? "查看正式選課與待分發的上課時段。"
                       : view === "chat"
-                        ? "用自然語言查詢課程、課表與選課條件。"
+                        ? "用自然語言查詢課程與課表，也可用英文直接加選或退選。"
+                        : view === "teaching"
+                          ? "查看授課班別的正式選課名單，登錄與更新成績。"
                         : view === "rules"
                           ? "從初選到加退選，清楚了解每一步。"
                           : "管理學期、開課班別、分發與通知。"}
@@ -1326,7 +1327,7 @@ export default function App() {
               <div className="panel-title">
                 <div>
                   <h2>✧ 選課助理</h2>
-                  <p>查課、規劃研究路徑或試排。初選可確認登記，加退選期間可用明確指令加選單門課。</p>
+                  <p>查課、規劃研究路徑或試排。加退選期間可用中文明確指令加選，或用英文加選、退選單門課（Llama 3.2 3B）。</p>
                 </div>
               </div>
               <div className="messages" ref={transcript} aria-label="助理對話">
@@ -1341,6 +1342,8 @@ export default function App() {
                         "我想做 RF，這學期先修什麼？",
                         "找星期二還有空位的電子系課",
                         "我星期三有課嗎？",
+                        "Please enroll me in CS101, section A.",
+                        "Please drop CS101, section A.",
                       ].map((t) => (
                         <button
                           key={t}
@@ -1365,7 +1368,22 @@ export default function App() {
                     {m.transcript && <p className="chat-transcript">語音辨識 {m.transcript}</p>}
                     <p aria-live={m.role === "assistant" ? "polite" : undefined}>{m.answer}</p>
                     {m.action && (
-                      <p>本學期正式選課 {m.action.total_credits} 學分 · 此班剩餘 {m.action.remaining} 席</p>
+                      <p>
+                        {m.action.status === "DROPPED" ? "已退選" : "已加選"} {m.action.course_code ?? ""}{" "}
+                        {m.action.course_title} {m.action.section_no} 班 · 本學期正式選課 {m.action.total_credits} 學分
+                        · 此班剩餘 {m.action.remaining} 席
+                        {m.action.status === "ENROLLED" && m.action.notification_id && " · 選課確認信已排入寄送（Gmail API）"}
+                      </p>
+                    )}
+                    {m.agent && (
+                      <small className="agent-trace">
+                        LangGraph · {m.agent.llm?.stub
+                          ? "固定測試規則（CHAT_STUB），未呼叫 LLM"
+                          : m.agent.llm?.local_rules
+                            ? "完整句型由本機規則判讀，未呼叫 LLM"
+                            : `${m.agent.llm?.server_model ?? m.agent.model} 伺服器回報 ${m.agent.llm?.prompt_tokens ?? "?"}+${m.agent.llm?.output_tokens ?? "?"} tokens · ${m.agent.llm?.total_ms ?? "?"} ms`}
+                        {" · "}{m.agent.tools.join(" → ")}
+                      </small>
                     )}
                     {m.as_of && <small>查詢時間 {dateTime(m.as_of)}</small>}
                     {m.registration && (
@@ -1393,7 +1411,8 @@ export default function App() {
                             </button>
                             <p>{choice.school_name} {choice.department_name} · {choice.is_selectable ? `剩餘 ${choice.remaining} 席` : "未開放"}</p>
                             <Meetings items={choice.meetings} />
-                            {m.registration?.phase === "INITIAL" && reg?.phase === "INITIAL" && (
+                            {m.choice_action !== "drop" && m.choice_action !== null &&
+                              m.registration?.phase === "INITIAL" && reg?.phase === "INITIAL" && (
                               <button type="button" className="small"
                                 disabled={busy || chatBusy || !choice.is_selectable || personalLoading || !!personalError}
                                 onClick={() => {
@@ -1404,7 +1423,12 @@ export default function App() {
                                   });
                                 }}>登記此班</button>
                             )}
-                            {m.prompt && m.registration?.phase === "ADD_DROP" && reg?.phase === "ADD_DROP" && (
+                            {m.prompt && m.choice_action === "drop" && reg?.phase === "ADD_DROP" && (
+                              <button type="button" className="small danger" disabled={chatBusy}
+                                onClick={() => ask(m.prompt, choice.section_id)}>退選此班</button>
+                            )}
+                            {m.prompt && m.choice_action !== "drop" && m.choice_action !== null &&
+                              m.registration?.phase === "ADD_DROP" && reg?.phase === "ADD_DROP" && (
                               <button type="button" className="small" disabled={chatBusy || !choice.is_selectable || choice.remaining <= 0}
                                 onClick={() => ask(m.prompt, choice.section_id)}>加選此班</button>
                             )}
@@ -1475,7 +1499,7 @@ export default function App() {
                   value={chatInput}
                   maxLength={1000}
                   rows={2}
-                  placeholder="輸入你的選課問題…"
+                  placeholder="輸入你的選課問題…（英文可直接加退選，例如 Please drop CS101 A.）"
                   onChange={(e) => setChatInput(e.target.value)}
                 />
                 <button
@@ -1496,7 +1520,7 @@ export default function App() {
             </section>
             {view === "rules" && (
               <section className="panel rules">
-                <p className="eyebrow">SRS 3.2 · 選課規則</p>
+                <p className="eyebrow">SRS 4.0 · 選課規則</p>
                 <h2>從登記，到正式選課</h2>
                 <div className="rule-grid">
                   {[
@@ -1510,7 +1534,7 @@ export default function App() {
                     ],
                     [
                       "即時加退選",
-                      "分發公布且加退選期間開放時，可確認加選或退選。操作成功後立即更新課表。",
+                      "分發公布且加退選期間開放時，可在網頁或英文選課助理加選、退選，兩者執行同一套檢查。加選成功後以 Gmail API 寄出選課確認信。",
                     ],
                   ].map(([h, p]) => (
                     <div key={h}>
@@ -1525,7 +1549,7 @@ export default function App() {
                   <li>同學期尚未正式選上相同課程（不同班別也算重複）。</li>
                   <li>所有先修科目已於先前結束的學期通過。</li>
                   <li>全部上課時段均未衝堂；首尾相接的時段可以同時選。</li>
-                  <li>加選後總學分不超過個人本學期上限。</li>
+                  <li>加選後總學分不超過 18 學分，也不超過個人本學期上限；剛好 18 學分可受理。</li>
                   <li>班別有效選課人數小於容量。</li>
                 </ol>
                 <p>
@@ -1537,6 +1561,15 @@ export default function App() {
                 </p>
               </section>
             )}
+            {view === "teaching" &&
+              (instructor ? (
+                <Teaching termId={termId} termCode={term?.code} onToast={setToast} />
+              ) : (
+                <div className="state">
+                  <h3>此頁限授課教師使用</h3>
+                  <button onClick={() => setLoginOpen(true)}>登入教師帳號</button>
+                </div>
+              ))}
             {view === "admin" &&
               (admin ? (
                 <Admin
@@ -1580,7 +1613,7 @@ export default function App() {
         <Modal title="登入選課系統" onClose={() => setLoginOpen(false)}>
           <form className="form-body" onSubmit={auth}>
             <p>
-              示範帳號：student01～student20 / admin
+              示範帳號：student01～student20 / teacher01～teacher04 / admin
               <br />
               共用密碼：Demo123!
             </p>
@@ -2126,6 +2159,7 @@ function Admin({
                     <th>嘗試次數</th>
                     <th>寄送時間 / 下次嘗試</th>
                     <th>錯誤摘要</th>
+                    <th>Gmail 訊息 ID</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2136,6 +2170,7 @@ function Admin({
                           ALLOCATION: "分發摘要",
                           TIMETABLE: "課表寄送",
                           INITIAL_RECEIPT: "初選登記確認",
+                          REGISTRATION_CONFIRMATION: "選課確認信（Gmail API）",
                           ENROLLED: "加選成功",
                           DROPPED: "退選成功",
                         }[n.type as string] || n.type}
@@ -2147,6 +2182,7 @@ function Admin({
                       <td>{n.attempt_count} / 3</td>
                       <td>{dateTime(n.sent_at || n.next_attempt_at)}</td>
                       <td>{n.last_error || "—"}</td>
+                      <td>{n.provider_message_id || "—"}</td>
                     </tr>
                   ))}
                 </tbody>

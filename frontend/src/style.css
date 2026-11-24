@@ -1864,3 +1864,58 @@ fieldset:disabled {
     scroll-behavior: auto !important;
   }
 }
+
+/* SRS 4.0: instructor roster and grades */
+.teaching {
+  display: grid;
+  gap: 18px;
+}
+.teaching-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  gap: 10px;
+  padding: 0 24px 22px;
+}
+.teaching-section {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  text-align: left;
+  border: 1px solid #e2def0;
+  border-radius: 10px;
+  background: #fff;
+  padding: 12px 14px;
+}
+.teaching-section.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(81, 75, 213, 0.15);
+}
+.teaching-section span,
+.teaching-section small {
+  color: var(--muted);
+}
+.roster td small {
+  display: block;
+  color: var(--muted);
+}
+.grade-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.grade-form input {
+  width: 7rem;
+}
+.grade-form input[aria-invalid="true"] {
+  border-color: #c2413b;
+}
+.grade-form .error {
+  flex-basis: 100%;
+  margin: 0;
+}
+.agent-trace {
+  display: block;
+  color: var(--muted);
+  font-size: 0.75rem;
+}

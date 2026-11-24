@@ -1,12 +1,18 @@
 # CourseFlow 大學選課與課程推薦系統
 
-**版本 2.1.0**。CourseFlow 提供公開查課、初選登記、分發、週課表與教務管理。學生可用文字或語音查課，依 16 種研究方向試排並確認選課。115-1 課庫涵蓋臺大、臺師大與臺科大電資參考課程。
+**版本 3.0.0**。CourseFlow 提供公開查課、初選登記、分發、週課表與教務管理。學生可在網頁或用英文對話加選、退選（LangGraph + Llama 3.2 3B），每學期最多 18 學分且不得衝堂，正式選課後以 Gmail API 寄出確認信。授課教師可查本班名單並登錄成績。學生也可用中文文字或語音查課，依 16 種研究方向試排並確認選課。所有語言模型與語音辨識都在本機執行：文字問答用 Llama 3.2 3B，語音用 faster-whisper，不使用雲端模型。115-1 課庫涵蓋臺大、臺師大與臺科大電資參考課程。
 
-介面使用繁體中文，時間以臺北時間顯示。示範班別的時間、容量、學分及教師均為虛構資料。系統使用 React、FastAPI、PostgreSQL、LangGraph、Gemini 與 Docker Compose。 [需求說明書 3.2](Course_Registration_SRS.md)
+介面使用繁體中文，時間以臺北時間顯示。示範班別的時間、容量、學分及教師均為虛構資料。系統使用 React、FastAPI、PostgreSQL、LangGraph、Llama 3.2 3B、faster-whisper、Gmail API 與 Docker Compose。 [需求說明書 4.0](Course_Registration_SRS.md)
 
-[快速部署](#docker-compose-啟動) · [部署設定](#部署設定) · [區網與語音](#區網登入與語音) · [選課與課表](#115-1-選課與課表) · [驗證與開發](#自動測試)
+[快速部署](#docker-compose-啟動) · [教師規格](#教師規格srs-40) · [部署設定](#部署設定) · [區網與語音](#區網登入與語音) · [本機模型](#本機模型中文查詢與語音) · [選課與課表](#115-1-選課與課表) · [驗證與開發](#自動測試)
 
 ![115-1 待分發課表與寄送課表按鈕](docs/timetable.png)
+
+### v3.0.0 主要變更
+
+- **教師規格（SRS 4.0）**：英文自然語言加選、退選（LangGraph + Llama 3.2 3B）；網頁與助理共用衝堂與每學期 18 學分檢查；正式選課後以 Gmail API 寄確認信；`INSTRUCTOR` 角色可查本班名單並登錄、修改成績。資料庫升級為 migration `0006`。
+- **移除 Gemini，全部改用本機模型**：中文查詢計畫改由 Llama 3.2 3B 產生並逐欄核對；語音改在 API 容器內以 faster-whisper 轉寫。不再需要 `GEMINI_*` 設定或任何雲端金鑰。
+- **可查證的模型呼叫**：每則助理回覆、API 回應與日誌都附模型伺服器回報的 token 數與耗時。
 
 ## Docker Compose 啟動
 
@@ -28,7 +34,7 @@ sudo docker compose version
 ### 首次部署
 
 ```bash
-git clone --branch v2.1.0 https://github.com/programmerKB/CourseFlow.git
+git clone --branch v3.0.0 https://github.com/programmerKB/CourseFlow.git
 cd CourseFlow
 sudo ./deploy.sh
 ```
@@ -49,9 +55,16 @@ sudo ./deploy.sh
 
 ```bash
 git fetch origin --tags
-git switch --detach v2.1.0
-sudo ./deploy.sh
+git switch --detach v3.0.0
+sudo ./deploy.sh --skip-seed
 ```
+
+從 v2.1.0 升級到 v3.0.0 時另需：
+
+1. **編輯 `.env`**（可對照 [.env.example](.env.example)）：刪除 `GEMINI_MODEL`、`GEMINI_AUDIO_MODEL`、`GEMINI_API_KEY`；設定 `LLAMA_BASE_URL`（中文與英文助理都需要，Windows 主機的 Ollama 見[教師規格](#使用-windows-本機的-ollamavm-透過-vmware-nat-連線)）；加入 `GMAIL_*`（尚未申請時可先設 `GMAIL_TRANSPORT=dev-smtp`，確認信改寄到 Mailpit）。
+2. **重新建置映像**：不要加 `--no-build`。建置時會下載 Whisper 語音模型（`base` 約 145 MB），之後容器不需連外。
+3. **資料庫**：migration `0006` 自動套用。個人學分上限大於 18 的學期會改為 18 並留稽核紀錄，原有選課保留；`sudo docker compose exec api python -m app.manage credit-overloads` 可列出已選超過 18 學分、需要輔導退選的學生。
+4. **驗證模型**：`sudo docker compose exec api python -m app.verify_llama` 與 `python -m app.verify_assistant`。
 
 更新時會暫停應用服務，套用 migration 後重新啟動。種子程式會補齊三校班別，將舊展示學期的班別補入 115-1，並保留原有班別、登記、選課、分發及先修紀錄。已完成初始化、只需套用程式或環境設定時，可用 `--skip-seed`。
 
@@ -63,6 +76,144 @@ sudo ./deploy.sh
 | `--scenario initial\|awaiting\|add-drop\|short` | 首次初始化的選課情境 |
 | `--env-file 路徑` | 指定環境檔，相對路徑以執行指令的目錄為準 |
 | `--timeout 秒數` | 每個服務與 HTTP 檢查的等待上限，預設 180 秒 |
+
+## 教師規格（SRS 4.0）
+
+3.0.0 依教師提供的 `Database.pdf` 第 1–4 節補齊下列功能。Web 與英文助理呼叫同一個 FastAPI 交易服務，寫入同一個 PostgreSQL。
+
+| 教師項目 | 實作 | 驗收測試 |
+|---|---|---|
+| 英文自然語言加選、退選（T-01、T-09–T-11） | LangGraph 流程 `english_registration`：Llama 3.2 3B 解析意圖，後端檢查明確性後，經指定工具 `add_course`／`drop_course` 寫入 | `test_at37_*`、`test_at38_*` |
+| Web 加選、退選（T-02） | 課程查詢、我的課表 | `test_at39_*`、`e2e.spec.ts` |
+| Gmail API 選課確認信（T-03） | 正式加選交易內建立 `REGISTRATION_CONFIRMATION`，Worker 呼叫 `users.messages.send` 並保存 Gmail 訊息 ID | `test_at40_*`、`test_at41_*` |
+| 衝堂、每學期 18 學分（T-04、T-05） | `registration.evaluate_admission` 的上限為 `min(個人上限, 18)`；`student_terms` 另有 `CHECK (credit_limit BETWEEN 0 AND 18)` | `test_at39_*` |
+| 教師名單、成績（T-06、T-07、T-12） | `INSTRUCTOR` 角色、「我的授課」頁、`grades` 表與成績稽核 | `test_at42_*`、`test_at43_*` |
+| PostgreSQL、資料一致（T-08、T-13） | migration `0006` 從 `0005` 升級並保留原 ID | `test_at44_*`、`test_at45_*` |
+
+### 英文選課助理（LangGraph + Llama 3.2 3B）
+
+在選課助理輸入英文即進入英文流程。只提到研究方向而沒有要加退選的英文訊息（例如 “My research topic is Edge AI, 2 courses only”）改走研究路徑流程，見[本機模型：中文查詢與語音](#本機模型中文查詢與語音)；兩者使用同一個 Llama 端點。例句：
+
+```text
+Please enroll me in CS101, section A.      I'd like to add CS101 A.
+Please drop CS101, section A.              Remove CS101 A from my schedule.
+Can I take CS101?                          Show my timetable.
+```
+
+只有「本人明確要求一門課」才會寫入。是否為明確要求由 Llama 判斷（`explicit_request`，口語如 “yo can u sign me up for CS101 A pls” 也算），常見的祈使句另由規則辨識；問句改做資格試查，否定句（Don't drop…）只回覆目前課表，條件句、引述、一次兩門、替他人操作或課名不明時請學生補充，這些情況即使模型判斷為要求也不寫入。模型輸出的課號必須出現在學生原句中；學生身分一律取自登入 Session。同名或多班時列出候選班別，學生點選後後端在鎖內重新核對。模型逾時或無法使用時回 `503 CHAT_UNAVAILABLE` 與網頁加退選入口，選課資料不變。
+
+使用內附的 Ollama 服務（首次下載約 2 GB；CPU 推論每次約數秒到數十秒）：
+
+```bash
+sudo ./deploy.sh --llm --skip-seed
+sudo docker compose exec api python -m app.verify_llama
+```
+
+也可改連遠端 OpenAI 相容端點，例如部署 `meta-llama/Llama-3.2-3B-Instruct` 的 vLLM：
+
+```dotenv
+LLAMA_BASE_URL=https://llm.example.edu
+LLAMA_API_STYLE=openai
+LLAMA_MODEL=meta-llama/Llama-3.2-3B-Instruct
+LLAMA_API_KEY=<token>
+```
+
+#### 使用 Windows 本機的 Ollama（VM 透過 VMware NAT 連線）
+
+VM 不跑模型，改連 Windows 上的 Ollama。VMware NAT 下，VM 的預設閘道是 `x.x.x.2`，Windows 本機在同一網段的位址是「VMware Network Adapter VMnet8」，通常為 `x.x.x.1`。例如 VM 為 `192.168.169.128` 時，網址是 `http://192.168.169.1:11434`。
+
+1. **Windows**：安裝 [Ollama for Windows](https://ollama.com/download/windows)。把專案的 `scripts/windows/setup-ollama.ps1` 複製到 Windows，以「系統管理員身分」開啟 PowerShell 執行：
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\setup-ollama.ps1 -VmSubnet 192.168.169.0/24
+   ```
+
+   腳本會設定 `OLLAMA_HOST=0.0.0.0:11434` 並重新啟動 Ollama、新增只允許 VM 網段連入 TCP 11434 的防火牆規則、執行 `ollama pull llama3.2:3b`，最後印出要貼到 VM 的 `LLAMA_BASE_URL`。Ollama 本身沒有登入機制，所以防火牆只開放給 VM 網段。也可手動完成：在 Windows 環境變數新增 `OLLAMA_HOST=0.0.0.0:11434`、從系統匣結束並重開 Ollama、開放防火牆 TCP 11434，再執行 `ollama pull llama3.2:3b`。
+
+2. **VM**：先測試連線與推論，不需 Docker：
+
+   ```bash
+   ./scripts/check-ollama.sh http://192.168.169.1:11434
+   ```
+
+   連線逾時表示位址錯誤或防火牆未開；連線被拒表示 Ollama 只監聽 `127.0.0.1` 或尚未啟動；缺少模型時在 Windows 執行 `ollama pull llama3.2:3b`。
+
+3. **把網址貼進 `.env`**：編輯專案根目錄的 `.env`（由 `sudo ./deploy.sh` 建立、只有 root 可讀，需用 `sudo nano .env`），新增或修改：
+
+   ```dotenv
+   LLAMA_BASE_URL=http://192.168.169.1:11434
+   LLAMA_API_STYLE=ollama
+   LLAMA_MODEL=llama3.2:3b
+   ```
+
+   套用設定（不要加 `--llm`，以免在 VM 另外啟動 Ollama）：
+
+   ```bash
+   sudo ./deploy.sh --skip-seed --no-build
+   sudo docker compose exec api python -m app.verify_llama
+   ```
+
+   部署最後會檢查 Llama 服務；連不到時只顯示警告與修正提示，網頁加退選照常運作。不使用 Docker 的本機開發可直接帶環境變數：`LLAMA_BASE_URL=http://192.168.169.1:11434 ./scripts/run-local.sh`。
+
+#### 確認助理真的呼叫 Llama，而非固定規則
+
+- **畫面**：每則助理回覆（英文加退選、中文查課與研究路徑，含被拒絕的加選）下方顯示「LangGraph · llama3.2:3b 伺服器回報 798+41 tokens · 468 ms · 工具」。token 數與耗時由 Ollama 回傳，程式無法自行產生；若顯示「固定測試規則（CHAT_STUB），未呼叫 LLM」，代表 `.env` 的 `CHAT_STUB=true`；「完整句型由本機規則判讀，未呼叫 LLM」表示問題符合固定句型（例如「找星期二還有空位的電子系課」），直接查資料庫。
+- **API 回應**：`agent.llm` 含 `server_model`、`prompt_tokens`、`output_tokens`、`total_ms` 與模型輸出；`agent.tools` 第一個工具為英文的 `llama.parse_intent` 或中文的 `llama.plan_query`（測試替身為 `stub.*`，固定句型為 `rules.plan_query`）。
+- **API 日誌**：`sudo docker compose logs api | grep -E "english_registration|course_assistant"` 每筆都有 `"llm": {"server_model": ...}`，不含學生訊息內容。`CHAT_STUB=true` 時 API 啟動會先印出警告。
+- **Windows 端**：`%LOCALAPPDATA%\Ollama\server.log` 會出現來自 VM（例如 `192.168.169.128`）的 `POST "/api/chat"`。
+- **指令**：`sudo docker compose exec api python -m app.verify_llama` 會顯示 `chat_stub`、伺服器版本、已安裝模型，以及每個探測句由伺服器回報的 token 數與耗時。
+
+模型無法使用時助理回 `503 CHAT_UNAVAILABLE`，不會改用固定規則回答；網頁查課與我的課表照常可用。已部署的服務需重新建置才會帶有上述證據欄位：`sudo ./deploy.sh --skip-seed`。
+
+Windows 重新開機或 VMware 重新配置網路後，VMnet8 位址可能改變，可用 `ipconfig` 核對後更新 `.env`。CPU 推論時第一次請求要載入模型，可能接近 `LLAMA_TIMEOUT_SECONDS`（預設 45 秒）；Ollama 會保留模型 30 分鐘，之後的請求較快。
+
+`verify_llama` 會用助理的實際提示詞送出 6 個探測句，列出模型名稱、是否為 Llama 3.2 3B、延遲與解析結果。每次英文請求都會在 API 日誌留下一筆 JSON，含 `graph`、`model`、`intent`、`tools` 與 `elapsed_ms`，不記錄訊息內容。回應的 `agent` 欄位同樣列出模型與呼叫的工具，畫面以「LangGraph · 模型 · 工具」顯示。
+
+### Gmail API 選課確認信
+
+正式加選成功（網頁、英文或中文助理單筆加選、加退選草案確認、初選分發錄取）時，同一交易建立一筆確認信事件。退選、待分發登記、試查及失敗請求不寄確認信；同鍵重送沿用原事件。課表信與分發摘要仍走 SMTP（Mailpit 或 Gmail SMTP）。
+
+1. 在 Google Cloud Console 啟用 Gmail API，設定 OAuth 同意畫面並把寄件帳號加入測試使用者，建立「電腦版應用程式」OAuth 用戶端。
+2. 取得只含 `gmail.send` 權限的 refresh token。指令會提示輸入用戶端密鑰；在遠端 VM 上可加 `--manual`。
+
+   ```bash
+   python3 scripts/gmail-oauth.py --client-id <id>.apps.googleusercontent.com
+   ```
+
+3. 把輸出的 `GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET`、`GMAIL_REFRESH_TOKEN` 與 `GMAIL_SENDER` 寫入 `.env`（不要加入 Git），再執行 `sudo ./deploy.sh --skip-seed`。
+4. 驗證授權並把示範學生的信箱改成可收信的測試信箱：
+
+   ```bash
+   sudo docker compose exec api python -m app.manage verify-gmail --send-to you@example.com
+   sudo docker compose exec api python -m app.manage set-email --login student05 --email you@example.com
+   ```
+
+「教務管理 → Email 通知狀態」顯示「選課確認信（Gmail API）」的狀態、嘗試次數、錯誤代碼與 Gmail 訊息 ID。暫時性錯誤（逾時、429、5xx）最多重試 3 次；未設定（`GMAIL_NOT_CONFIGURED`）、授權失敗（`GMAIL_AUTH_FAILED`）或權限不足時直接記為 `FAILED`。錯誤欄只存固定代碼，不存 Google 回應內容。
+
+`GMAIL_TRANSPORT=dev-smtp` 只供本機預覽：同一封信改送 Mailpit，訊息 ID 以 `dev-smtp:` 開頭，不能作為 Gmail API 驗收。
+
+### 授課教師名單與成績
+
+教師帳號 `teacher01`～`teacher04`（密碼 `Demo123!`）連結既有教師主檔。登入後只看到「課程查詢」、「我的授課」與「選課規則」。
+
+1. 「我的授課」列出本人在所選學期的授課班別與正式選課人數。
+2. 點選班別後顯示 `ENROLLED` 學生（依學號排序），已退選與待分發學生不列入。
+3. 輸入 0–100、最多兩位小數的成績後按「儲存」。同一筆修課紀錄只有一筆目前成績，每次新增或修改都寫入稽核（教師帳號、時間、課號、修改前後分數）。
+
+非本人授課班別或錯配的修課紀錄回 `404`，學生或管理員呼叫教師 API 回 `403`。
+
+### 課堂 Demo（SRS §10.2）
+
+使用隔離環境：`.env` 設 `PUBLIC_INITIAL_TERM_ID=`，首次部署 `sudo ./deploy.sh --scenario add-drop --llm`。種子讓 `student05` 在 115-1 已有 15 學分（CS201、CS301、EE101、EE301、EE302）。
+
+1. `student05` 登入，在網頁或英文助理查看 15 學分課表。
+2. 英文助理輸入 `Please enroll me in CS101, section A.`。CS101 A 與 CS201 A 首尾相接，加選後為 18 學分，回覆顯示確認信已排入 Gmail API 寄送。
+3. `I'd like to add CS303 A.` 回 `CREDIT_LIMIT_EXCEEDED`（21 學分）；`Please enroll me in CS302, section A.` 回 `TIME_CONFLICT` 並列出衝突班別。
+4. `Please drop CS101, section A.` 後到網頁「我的課表」確認回到 15 學分。
+5. 以 `teacher01` 登入「我的授課」，開啟 CS301 A，為 `B11500005` 登錄 82 分再改成 90 分。改用學生帳號呼叫同一個 API 會得到 `403`。
+6. 對照 `enrollments`、`grades`、`notification_outbox`（`provider_message_id`）與 `audit_events` 的紀錄。
+
+從 2.1.0 升級的資料庫可用 `python -m app.manage credit-overloads` 列出既有選課已超過 18 學分的學生學期，再由學生退選處理。
 
 ## 部署設定
 
@@ -126,7 +277,7 @@ PostgreSQL 使用 `course_db` volume，`docker compose down` 後資料仍會保�
 
 初選期間可說「我要登記初選電路學」或「我要加選電路學」，再點辨識結果中的「登記此班」並確認。若先以語音查詢研究方向，可接著說「請試排這個方向的本期課程」，再確認試排中的班別。辨識有誤時，可點「編輯辨識文字」修正後送出。
 
-送出的錄音由後端轉成單聲道 WAV 並傳給 `GEMINI_AUDIO_MODEL` 轉寫。Compose 映像已安裝 FFmpeg。本機啟動須另安裝 FFmpeg 並讓 `ffmpeg` 可從 PATH 執行。文字直接加選、已知研究路徑與本人選課查詢可在 Gemini 暫時無法使用時繼續操作。語音與文字模型分別依設定啟用。[Gemini 音訊輸入](https://ai.google.dev/gemini-api/docs/audio) · [預設模型支援格式](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite)
+送出的錄音由後端用 FFmpeg 轉成 16 kHz 單聲道，在 API 容器內以 faster-whisper 轉寫，錄音不會傳到外部服務。設定與模型大小見[本機模型：中文查詢與語音](#本機模型中文查詢與語音)。Compose 映像已安裝 FFmpeg。本機啟動須另安裝 FFmpeg 並讓 `ffmpeg` 可從 PATH 執行。[faster-whisper](https://github.com/SYSTRAN/faster-whisper)
 
 ## 115-1 選課與課表
 
@@ -142,8 +293,9 @@ PostgreSQL 使用 `course_db` volume，`docker compose down` 後資料仍會保�
 | `admin` | `Demo123!` | 學期、時段、班別、容量、分發與通知管理 |
 | `student01`～`student10` | `Demo123!` | 資工系學生，已於歷史學期通過程式設計、資料結構 |
 | `student11`～`student20` | `Demo123!` | 電子系學生，包含先修未通過案例 |
+| `teacher01`～`teacher04` | `Demo123!` | 授課教師；teacher01 教 CS101 A、CS301 A、CS303 A、CS399 A，teacher02 教 CS101 B、CS201 A、CS302 A、CS304 A |
 
-在 115-1，`student20` 學分上限為 3.0，其他示範學生為 25.0。`student19` 已選上容量 1 的軟體工程。
+在 115-1，`student20` 學分上限為 3.0，其他示範學生為 18.0（系統上限）。`student19` 已選上容量 1 的軟體工程。`add-drop` 情境首次建立時，`student05` 另有 15 學分供教師規格展示。
 
 「我是電子系學生，給我修課建議」會依電子工程系的公開班別和登入者目前的選課紀錄試排。「我剛剛選了什麼？」會列出本學期的待分發登記及正式選課。這兩種明確問法可由資料庫直接回答。
 
@@ -189,7 +341,7 @@ sudo ./deploy.sh --scenario short
 3. 推薦可涵蓋三校課程和 `DEMO-501` 至 `DEMO-505`。展開推薦可核對大綱、先修、全部時段與研究延伸。
 4. 在初選期間按「確認初選登記」，查看待分發結果。加退選期間按「確認加選」，更新正式課表。若名額或課表已變動，可按「更新試排」。
 
-測試時可使用 `CHAT_STUB=true`，讓固定意圖走同一條推薦與選課流程。實際 Gemini 驗收需設定金鑰與 `CHAT_STUB=false`。
+測試時可使用 `CHAT_STUB=true`，讓固定意圖走同一條推薦與選課流程。實機驗收需設定 `LLAMA_BASE_URL` 與 `CHAT_STUB=false`。
 
 ### 三校課庫與單門加選
 
@@ -200,95 +352,57 @@ sudo ./deploy.sh --scenario short
 3. 省略校系時會列出同名課的候選班別。初選期間可點「登記此班」並確認，課表會顯示待分發。加退選期間可點「加選此班」。
 4. 輸入「我想做 RF，這學期先修什麼？」查看基礎、進階和研究專題。可接著按「試排本期課程」，再確認要提交的班別。「IC 設計」和「NVM」會先請你選方向。
 
-## Gemini 設定與驗收
+## 本機模型：中文查詢與語音
 
-### 設定模型與金鑰
+本版不使用 Gemini 或其他雲端模型。中文問答與英文加退選共用同一個 Llama 3.2 3B 端點（`LLAMA_BASE_URL`，設定方式見 [Windows 本機 Ollama](#教師規格srs-40)），語音在 API 容器內以 faster-whisper 轉寫。
 
-在 Google AI Studio 選擇專案、建立 API 金鑰，再填入 VM 的 `.env`。 [建立 Gemini API 金鑰](https://aistudio.google.com/apikey) · [金鑰設定文件](https://aistudio.google.com/docs/api-key)
+### 中文查詢如何使用 Llama
 
-```bash
-sudo nano .env
-```
+1. 完整固定句型（例如「找星期二還有空位的電子系課」、「我是電子系學生 給我修課建議」）與「我要加選…」指令直接由本機規則處理，不呼叫模型。
+2. 其餘問題（例如「我想做晶片設計，該修什麼課？」、「My research topic is Edge AI, 2 courses only, Wednesday」）交給 Llama 產生結構化查詢計畫：要用的工具（查課、課表、資格、研究推薦等）、課名、系所、星期、門數與時段。
+3. 程式逐欄核對計畫：學生沒說出的系所、學校、星期、門數或時段一律刪除（3B 模型常自行補上「臺大」或範例中的星期）。查他人資料與代為退選仍由本機防護攔下。
+4. 核對後的計畫交給 PostgreSQL 唯讀工具執行。研究路徑的基礎、進階與研究專題來自審核過的路徑資料，「這學期可優先考慮」依修課紀錄、先修與開課班別計算，模型只負責理解問題，不產生課程內容。
 
-在環境檔修改這四項設定，將金鑰保存在 VM 本機。
+### 驗證
 
-```ini
-GEMINI_MODEL=gemini-3.5-flash-lite
-GEMINI_AUDIO_MODEL=gemini-3.5-flash-lite
-GEMINI_API_KEY=貼上你在Google_AI_Studio建立的Gemini_API金鑰
-CHAT_STUB=false
-```
-
-目前預設 `gemini-3.5-flash-lite`，可改為專案可用且支援結構化輸出的模型。選課助理透過 `langchain-google-genai` 連接 Gemini Developer API，用 Pydantic 驗證結構化計畫，再從 PostgreSQL 取得課程與資格。最小連線測試額外提供直接 REST 診斷。[模型說明](https://aistudio.google.com/docs/models/gemini-3.5-flash-lite) · [LangChain Gemini 整合](https://docs.langchain.com/oss/python/integrations/chat/google_generative_ai)
-
-重建 API 容器以載入新的程式與環境變數。等 API 就緒後重啟前端代理，讓它重新解析 API 容器位址。
+以下指令用真實模型測試 115-1 查課與研究推薦，並比對 PostgreSQL 中的公開班別。回應必須帶有模型伺服器回報的 token 數，否則判定未呼叫模型。
 
 ```bash
-sudo docker compose up --build --no-deps --force-recreate --wait api &&
-  sudo docker compose restart frontend
+sudo docker compose exec api python -m app.verify_assistant
+sudo docker compose exec api python -m app.verify_assistant --connection-only   # 只檢查模型服務
 ```
 
-確認容器是否已載入設定（只顯示是否存在金鑰，不顯示內容），再以學生帳號登入測試，例如 `student01`：
+通過時 API 容器的 `/tmp/assistant-verification.json` 會記錄公開課程結果、模型輸出的計畫與伺服器證據，不含學生課表或確認草案：
 
 ```bash
-sudo docker compose exec api python -c 'import os; print({"GEMINI_MODEL": os.getenv("GEMINI_MODEL"), "GEMINI_AUDIO_MODEL": os.getenv("GEMINI_AUDIO_MODEL"), "CHAT_STUB": os.getenv("CHAT_STUB"), "GEMINI_API_KEY_SET": bool(os.getenv("GEMINI_API_KEY", "").strip())})'
+sudo docker compose cp api:/tmp/assistant-verification.json docs/assistant-verification.json
 ```
-
-預期看到 `GEMINI_API_KEY_SET: True`、`CHAT_STUB: 'false'` 及指定的模型名稱。這只確認設定載入，實際呼叫仍取決於金鑰權限、模型可用性、網路與專案額度。
-
-### 驗證與診斷
-
-以下指令用真實 Gemini 測試 115-1 查課與研究推薦，並比對 PostgreSQL 中的公開班別。
-
-```bash
-sudo docker compose exec api python -m app.verify_gemini
-```
-
-若失敗，指令會以退出碼 1 輸出診斷 JSON，包含 `reason_code`，以及可辨識的 `http_status`、`provider_status`、`provider_reasons`、`request_fields` 與處理提示。診斷只顯示已知代碼及欄位名稱。例如 HTTP 400 搭配 `API_KEY_INVALID` 表示金鑰無效。
-
-可先執行最小連線測試，使用同一組模型與金鑰傳送固定公開文字，不存取資料庫、不要求結構化輸出：
-
-```bash
-sudo docker compose exec api python -m app.verify_gemini --connection-only
-```
-
-若最小請求也失敗，先依診斷檢查金鑰、專案限制、帳務及地區條件；若最小請求成功而完整查詢失敗，再檢查結構化輸出與應用程式設定。最小連線測試不會產生完整驗收紀錄，仍需執行未加參數的驗證指令確認課程查詢。
-
-若仍只有 `400 INVALID_ARGUMENT` 而沒有可辨識原因，可在主機專案目錄執行下列指令，不必再次建置映像檔：
-
-```bash
-sudo docker compose exec -T api python < scripts/diagnose-gemini.py
-```
-
-此腳本從容器讀取金鑰與模型，向 Google 的 `generateContent` 端點傳送固定公開文字。請求失敗時，查看遮蔽金鑰後的 `provider_message`，並依訊息檢查金鑰、專案或 API 條件。
-
-兩個情境皆通過比對時，API 容器的 `/tmp/gemini-verification.json` 會記錄公開課程結果與推薦依據。紀錄不含學生課表、金鑰或確認草案。
-
-```bash
-sudo docker compose cp api:/tmp/gemini-verification.json docs/gemini-verification.json
-```
-
-選課、課表、寄信與明確指定星期、系所和空位的查課可直接使用資料庫。需由 Gemini 處理的問題會在服務無法使用時提供課程查詢及課表入口。`CHAT_STUB=true` 供測試使用，以固定意圖執行同一套 LangGraph 與資料庫工具。
-
-若仍失敗，畫面會顯示對應提示。API 日誌會記錄 `reason_code`，收到 Gemini HTTP 錯誤時也會記錄 `provider_http_status`。Gemini 回傳 500、502 或 503 時，助理會在原有逾時上限內等候片刻並重試一次。[Gemini 重試指南](https://aistudio.google.com/docs/troubleshooting#retry-strategy)
 
 | reason_code | 處理方式 |
 |---|---|
-| `GEMINI_NOT_CONFIGURED` | 填入 Gemini 金鑰，重新建立 `api` 容器；只執行 `restart api` 不會更新 Compose 環境變數 |
-| `GEMINI_AUTH_FAILED` | 檢查金鑰是否有效、是否有 Gemini API 存取權限 |
-| `GEMINI_PAYMENT_REQUIRED` | 在 Google AI Studio 檢查專案帳務 |
-| `GEMINI_MODEL_UNAVAILABLE` | 更新為該專案可使用且支援結構化輸出的模型 |
-| `GEMINI_QUOTA_EXCEEDED` | 檢查 Google AI Studio 的專案額度與請求速率，稍後再試 |
-| `GEMINI_REQUEST_REJECTED` | 檢查 API 金鑰、模型名稱與模型參數設定 |
-| `GEMINI_TIMEOUT` | 檢查容器連外網路，稍後再試 |
-| `GEMINI_PROVIDER_UNAVAILABLE` | 重試後 Gemini 仍回傳 500、502 或 503，請稍後再試 |
+| `LLAMA_NOT_CONFIGURED` | 在 `.env` 設定 `LLAMA_BASE_URL`，重新建立 `api` 容器；只執行 `restart api` 不會更新 Compose 環境變數 |
+| `LLAMA_UNREACHABLE` | 位址、防火牆或 Ollama 只監聽 127.0.0.1；執行 `python -m app.verify_llama --server-only` 查看提示 |
+| `LLAMA_TIMEOUT` | 第一次載入模型較慢，稍後重試或調高 `LLAMA_TIMEOUT_SECONDS` |
+| `LLAMA_MODEL_UNAVAILABLE` | 在模型主機執行 `ollama pull llama3.2:3b` |
+| `LLAMA_AUTH_FAILED`、`LLAMA_RATE_LIMITED`、`LLAMA_UNAVAILABLE` | 檢查 OpenAI 相容端點的金鑰或服務狀態 |
+| `LLAMA_INVALID_OUTPUT` | 模型回傳的計畫無法解析；換個說法再試，若持續發生請確認模型是 `llama3.2:3b` |
 | `CHAT_FAILED` | 以 request_id 對照 `sudo docker compose logs --tail 100 api` 查閱錯誤類別 |
 
-完整驗收結果以 `python -m app.verify_gemini` 產生的[真實 Gemini 紀錄](docs/gemini-verification.json)為準。
+### 語音辨識（faster-whisper）
+
+建置映像時會下載 `WHISPER_MODEL` 並放進映像，執行時設定 `HF_HUB_OFFLINE=1`，容器不需連外。預設 `base`：VM（4 核、2 執行緒）實測 4–13 秒的錄音約 0.7–1.8 秒轉寫完成，API 程序約多用 450 MB 記憶體。`small` 較準確，但約需 1 GB 記憶體、速度慢一倍，記憶體 4 GB 以上再考慮。
+
+```ini
+WHISPER_MODEL=base        # 改成 small 後需重新建置：sudo ./deploy.sh --skip-seed
+WHISPER_CPU_THREADS=2     # 0 由 CTranslate2 自行決定
+WHISPER_PRELOAD=true      # API 啟動後先在背景載入模型
+```
+
+轉寫提示詞包含選課常用語（加選、退選、試排、課號與班別），讓課號維持「CS101 A 班」的寫法；偶爾出現的簡體字以 OpenCC 轉成臺灣繁體。平均信心過低、文字重複或只是重述提示詞時回 `422 VOICE_UNCLEAR`，不會送出加選。模型載入失敗時回 `503 VOICE_UNAVAILABLE`，API 日誌只記錄錯誤類別（`whisper_preload_failed` 或 `voice_unavailable`）。
 
 ## Email 設定與 SMTP 錯誤排查
 
-課表信列出正式選課、待分發班別、上課時間、教室和學分。管理員可在「教務管理 → Email 通知狀態」查閱 Worker 處理結果。
+本節的 SMTP 設定用於課表信與分發摘要。正式選課確認信使用 Gmail API，設定見 [Gmail API 選課確認信](#gmail-api-選課確認信)。課表信列出正式選課、待分發班別、上課時間、教室和學分。管理員可在「教務管理 → Email 通知狀態」查閱 Worker 處理結果。
 
 ### Mailpit 測試收信
 
@@ -357,11 +471,13 @@ PUBLIC_DATABASE_URL=postgresql+psycopg://course_public:course_public@127.0.0.1:5
 .venv/bin/python backend/run_tests.py
 ```
 
+教師規格驗收（AT-37–AT-45）在 `backend/tests/test_teacher_spec.py`。英文流程使用 `CHAT_STUB=true` 的固定意圖解析，經過與 Llama 相同的 LangGraph 防護、工具與交易；Llama 與 Gmail 的 HTTP 格式、錯誤與重試以模擬傳輸驗證。實機 Llama 與 Gmail 驗收請依[教師規格](#教師規格srs-40)的 `verify_llama`、`verify-gmail` 步驟另外執行。
+
 部署腳本可用 `python3 -m unittest discover -s scripts/tests -v` 驗證。測試會使用模擬 Docker CLI。
 
 ### 瀏覽器
 
-跨學期的瀏覽器回歸會進行加退選、初選登記、課表寄送和容量維護。請使用獨立測試資料庫，以 `seed('add-drop', recommendation_demo=True, university_demo=True, include_demo_terms=True)` 建立測試情境，設定 `PUBLIC_INITIAL_TERM_ID=`、`CHAT_STUB=true` 並將 SMTP 指向 Mailpit，再啟動前後端。
+跨學期的瀏覽器回歸會進行加退選、初選登記、課表寄送和容量維護。請使用獨立測試資料庫，以 `seed('add-drop', recommendation_demo=True, university_demo=True, include_demo_terms=True, teacher_demo=True)` 建立測試情境，設定 `PUBLIC_INITIAL_TERM_ID=`、`CHAT_STUB=true` 並將 SMTP 指向 Mailpit，再啟動前後端。
 
 ```bash
 cd frontend
@@ -385,7 +501,7 @@ E2E_BASE_URL=http://localhost:5173 npm run test:e2e
 
 若有 Mailpit 可執行檔，可將它放在 `.runtime/mailpit`，腳本會啟動 SMTP 1025 與 Web 8025。本機腳本使用 Mailpit 的無帳密設定。SMTP 暫時無法使用時，郵件依 Outbox 規則重試。
 
-真實金鑰可放入專案根目錄的 `.env`。測試用文字分類可用 `CHAT_STUB=true ./scripts/run-local.sh`。語音端點使用 Gemini 轉寫，整合測試會模擬這個回應。
+模型位址等設定可放入專案根目錄的 `.env`。測試用文字分類可用 `CHAT_STUB=true ./scripts/run-local.sh`。語音端點在本機以 faster-whisper 轉寫，第一次使用會把 `WHISPER_MODEL`（base 約 145 MB）下載到 Hugging Face 快取；整合測試以替身模型驗證轉寫狀態與繁體轉換。
 
 若目前帳號無法讀取 `.env`，本機程序會改用環境變數及預設值。Compose 仍由執行部署的帳號讀取自己的環境檔。
 
@@ -396,28 +512,38 @@ E2E_BASE_URL=http://localhost:5173 npm run test:e2e
 | API | 用途 |
 |---|---|
 | `GET /api/v1/schools`、`GET /api/v1/topics` | 提供公開查課的校系與主題選項。班別列表接受 `school_code` 和 `topic_code`。 |
-| `POST /api/v1/chat` | 傳送 `message` 與 `term_id`。直接加選帶 `Idempotency-Key`。從候選選班時附原指令與 `section_id`。已選定研究方向後可用 `track_code` 接續試排。 |
+| `POST /api/v1/me/terms/{term_id}/enrollments` | 網頁加選。`201` 回傳選課、剩餘名額、總學分、學分上限與確認信 `notification_id`。 |
+| `POST /api/v1/chat` | 傳送 `message` 與 `term_id`。英文訊息走 Llama 3.2 3B 流程，成功時 `mode` 為 `add_course` 或 `drop_course`，`action.status` 為 `ENROLLED` 或 `DROPPED`。加退選帶 `Idempotency-Key`。從候選選班時附原指令與 `section_id`（`choice_action` 指出加選、退選或初選登記）。已選定研究方向後可用 `track_code` 接續試排。 |
+| `GET /api/v1/instructor/terms/{term_id}/sections` | 教師本人在該學期的授課班別與正式選課人數。 |
+| `GET /api/v1/instructor/terms/{term_id}/sections/{section_id}/roster` | 本班 `ENROLLED` 學生的 `enrollment_id`、學號、姓名、`score` 與 `graded_at`。 |
+| `PUT /api/v1/instructor/terms/{term_id}/sections/{section_id}/roster/{enrollment_id}/grade` | 以 `{"score": 90.5}` 新增或更新成績（0–100，兩位小數）。相同分數重送回原成績。 |
 | `POST /api/v1/chat/voice` | 以 `multipart/form-data` 傳送 `audio`、`term_id` 並附 `Idempotency-Key`。可用 `track_code` 接續研究方向試排。回傳轉寫及與文字助理相同的結果。 |
 | `POST /api/v1/me/terms/{term_id}/selection-plans/{plan_id}/confirm` | 只接受本人草案中的 1–5 班。`section_ids` 是確定送出的班別集合。任一班失敗時整批回滾，回應以 `details.section_id` 指出班別。 |
 | `POST /api/v1/me/terms/{term_id}/timetable/email` | 將當下課表排入本人信箱的寄送佇列。`201` 回傳 `notification_id`。 |
 
 ```text
-frontend/src/              React 介面、型別與 API client
+frontend/src/              React 介面、型別與 API client（Teaching.tsx 為教師名單與成績）
 frontend/tests/            Playwright 端到端測試
 backend/app/models.py      資料模型與關聯約束
 backend/app/registration.py 共用規則、鎖定、分發、冪等性
 backend/app/auth.py         Argon2id、隨機 Session、撤銷
 backend/app/admin.py        草稿設定、公開、班別與容量
-backend/app/chat.py         LangGraph、Gemini、公開唯讀 SQL 工具
+backend/app/chat.py         LangGraph、Llama 查詢計畫與欄位核對、公開唯讀 SQL 工具；英文訊息轉交 english_agent
+backend/app/english_agent.py 英文加退選 LangGraph 流程、防護規則與指定工具
+backend/app/llama.py        Llama 3.2 3B 用戶端（Ollama 或 OpenAI 相容端點），兩個助理共用
+backend/app/voice.py        錄音驗證、FFmpeg 轉檔與 faster-whisper 本機轉寫
+backend/app/instructor.py   教師名單、成績與稽核
+backend/app/gmail.py        Gmail API OAuth 與 users.messages.send
+backend/app/manage.py       verify-gmail、set-email、credit-overloads 維運指令
 backend/app/recommendation.py 主題排行、資格試排、草案與來源證據
-backend/app/worker.py       SMTP Outbox Worker
+backend/app/worker.py       Outbox Worker：確認信走 Gmail API，其他通知走 SMTP
 backend/app/seed.py         固定 ID 的可重複種子資料
 backend/alembic/            migration、固定初版 DDL 與公開 View
 backend/tests/             PostgreSQL 整合、併發、SMTP 與效能測試
-scripts/                   初始化及本機開發腳本
-compose.yaml               PostgreSQL、migration、API、前端、通知及 HTTPS
+scripts/                   初始化、本機開發、gmail-oauth.py、check-ollama.sh 及 windows/setup-ollama.ps1
+compose.yaml               PostgreSQL、migration、API、前端、通知、HTTPS 及選用 Ollama
 ```
 
 [架構、核心 ERD 與交易設計](docs/architecture.md)、[SQL 與 EXPLAIN ANALYZE BUFFERS](docs/explain.txt)、[效能數據](docs/performance.json)、[課程查詢畫面](docs/desktop.png)、[手機畫面](docs/mobile.png)。
 
-歷史驗收紀錄可參閱 [v2.0.0 驗證報告](docs/verification-v2.md) 與 [v1.0.0 驗證紀錄](docs/verification.md)。
+本版驗收紀錄見 [v3.0.0 驗證報告](docs/verification-v3.0.md)。歷史驗收紀錄可參閱 [v2.0.0 驗證報告](docs/verification-v2.md) 與 [v1.0.0 驗證紀錄](docs/verification.md)。

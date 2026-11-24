@@ -9,6 +9,7 @@ scenario='initial'
 seed_enabled=true
 build_enabled=true
 https_enabled=false
+llm_enabled=false
 timeout_seconds=180
 stage='參數檢查'
 compose_ready=false
@@ -27,6 +28,7 @@ usage() {
   --skip-seed       略過示範帳號與課程初始化，適合已有資料的部署。
   --no-build        使用既有映像檔，略過建置。
   --https           加開 HTTPS。讀取專案 .tls/server.crt 及 .tls/server.key。
+  --llm             啟動內附的 Ollama 服務並下載 LLAMA_MODEL（預設 llama3.2:3b），供英文選課助理使用。
   --env-file PATH   指定環境檔；相對路徑以執行指令時的目錄為準。
   --timeout N       每個服務與 HTTP 檢查最多等待 N 秒（1–3600，預設 180）。
   -h, --help        顯示說明。
@@ -76,6 +78,7 @@ while (( $# )); do
     --skip-seed) seed_enabled=false; shift ;;
     --no-build) build_enabled=false; shift ;;
     --https) https_enabled=true; shift ;;
+    --llm) llm_enabled=true; shift ;;
     --env-file)
       require_value "$@"
       if [[ "$2" == /* ]]; then env_file="$2"; else env_file="$caller_dir/$2"; fi
@@ -114,6 +117,9 @@ fi
 compose=(docker compose --project-directory "$project_dir" --file "$project_dir/compose.yaml" --env-file "$env_file")
 if [[ "$https_enabled" == true ]]; then
   compose+=(--profile https)
+fi
+if [[ "$llm_enabled" == true ]]; then
+  compose+=(--profile llm)
 fi
 services="$("${compose[@]}" config --services)"
 if [[ $'\n'"$services"$'\n' == *$'\nhttps\n'* ]]; then
@@ -199,6 +205,14 @@ stage='啟動資料庫與 Mailpit'
 wait_service db true
 wait_service mailpit false
 
+if [[ "$llm_enabled" == true ]]; then
+  stage='啟動 Llama 3.2 3B 模型服務'
+  "${compose[@]}" up --detach ollama
+  wait_service ollama false
+  printf '下載或更新模型（首次約 2 GB）…\n'
+  "${compose[@]}" exec -T ollama sh -c 'ollama pull "$LLAMA_MODEL"'
+fi
+
 stage='確認初選時段'
 initial_period_command=(sh -c '
 if [ -n "${INITIAL_START_AT:-}${INITIAL_END_AT:-}" ]; then
@@ -242,6 +256,14 @@ if [[ "$https_enabled" == true ]]; then
   stage='啟動 HTTPS'
   "${compose[@]}" up --detach --no-deps --force-recreate https
   wait_service https false
+fi
+
+stage='檢查 Llama 模型服務'
+printf '\n檢查英文選課助理的 Llama 模型服務（LLAMA_BASE_URL）…\n'
+# The model may run on another machine (for example Ollama on the Windows host), so a failure only warns.
+if ! "${compose[@]}" exec -T api python -m app.verify_llama --server-only; then
+  printf '注意：英文選課助理目前連不到 Llama 模型服務，網頁加退選不受影響。\n' >&2
+  printf '依上方提示修正 Windows 的 Ollama 或 .env 的 LLAMA_BASE_URL 後，執行 ./deploy.sh --skip-seed --no-build。\n' >&2
 fi
 
 stage='部署結果'

@@ -1,5 +1,6 @@
 from functools import lru_cache
 import logging
+from typing import Literal
 from uuid import UUID
 from pydantic import AnyHttpUrl, AwareDatetime, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,9 +28,6 @@ class Settings(BaseSettings):
     initial_start_at: AwareDatetime | None = None
     initial_end_at: AwareDatetime | None = None
     session_hours: int = 24
-    gemini_model: str = 'gemini-3.5-flash-lite'
-    gemini_audio_model: str = 'gemini-3.5-flash-lite'
-    gemini_api_key: str = ''
     chat_stub: bool = False
     smtp_host: str = 'mailpit'
     smtp_port: int = 1025
@@ -37,6 +35,55 @@ class Settings(BaseSettings):
     smtp_password: str = ''
     smtp_from: str = '選課通知 <courses@example.test>'
     smtp_starttls: bool = False
+    # Both assistants use the local Llama 3.2 3B behind an Ollama or OpenAI-compatible endpoint:
+    # English add/drop (FR-21/22) and the Chinese assistant's query plans. No cloud model is used.
+    llama_base_url: str = ''
+    llama_api_style: Literal['ollama', 'openai'] = 'ollama'
+    llama_model: str = 'llama3.2:3b'
+    llama_api_key: SecretStr = SecretStr('')
+    llama_timeout_seconds: float = 45.0
+    # Voice input (FR-15/16): speech-to-text runs in the API process with faster-whisper.
+    whisper_model: str = 'base'
+    whisper_model_dir: str = ''
+    whisper_device: Literal['cpu', 'cuda', 'auto'] = 'cpu'
+    whisper_compute_type: str = 'int8'
+    whisper_cpu_threads: int = 2
+    whisper_preload: bool = False
+    # Registration confirmations (FR-24) use the Gmail API. dev-smtp is a local preview only.
+    gmail_transport: Literal['api', 'dev-smtp'] = 'api'
+    gmail_client_id: str = ''
+    gmail_client_secret: SecretStr = SecretStr('')
+    gmail_refresh_token: SecretStr = SecretStr('')
+    gmail_sender: str = ''
+
+    @field_validator('llama_base_url')
+    @classmethod
+    def validate_llama_base_url(cls, value: str) -> str:
+        value = value.strip().rstrip('/')
+        if value:
+            url = AnyHttpUrl(value)
+            if url.username is not None or url.password is not None or url.query is not None:
+                raise ValueError('LLAMA_BASE_URL must be a plain HTTP(S) base URL without credentials or parameters.')
+        return value
+
+    @field_validator('whisper_cpu_threads')
+    @classmethod
+    def validate_whisper_threads(cls, value: int) -> int:
+        if not 0 <= value <= 64:
+            raise ValueError('WHISPER_CPU_THREADS must be between 0 and 64 (0 lets CTranslate2 choose).')
+        return value
+
+    @field_validator('llama_timeout_seconds')
+    @classmethod
+    def validate_llama_timeout(cls, value: float) -> float:
+        if not 1 <= value <= 300:
+            raise ValueError('LLAMA_TIMEOUT_SECONDS must be between 1 and 300.')
+        return value
+
+    @property
+    def gmail_configured(self) -> bool:
+        return bool(self.gmail_client_id.strip() and self.gmail_client_secret.get_secret_value().strip()
+                    and self.gmail_refresh_token.get_secret_value().strip() and self.gmail_sender.strip())
 
     @field_validator('app_origin')
     @classmethod

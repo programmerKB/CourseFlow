@@ -1,9 +1,10 @@
 export type User = {
   id: string;
   login: string;
-  role: "STUDENT" | "ADMIN";
+  role: "STUDENT" | "INSTRUCTOR" | "ADMIN";
   display_name: string;
   student_id: string | null;
+  instructor_id: string | null;
 };
 export type Term = {
   id: string;
@@ -204,14 +205,18 @@ export type ChatResponse = {
   choices?: CourseChoice[];
   choice_total?: number;
   track_choices?: { track_code: string; title: string }[];
+  choice_action?: "add" | "drop" | "apply" | null;
+  agent?: AgentTrace;
   registration?: Registration;
   transcript?: string;
   transcript_status?: "CLEAR" | "UNCLEAR" | "SILENT";
   action?: {
-    status: "ENROLLED";
+    status: "ENROLLED" | "DROPPED";
     term_id: string;
     enrollment_id: string;
     section_id: string;
+    course_code?: string | null;
+    notification_id?: string | null;
     school_code: string;
     school_name: string;
     department_name: string;
@@ -222,12 +227,51 @@ export type ChatResponse = {
     submitted_at: string;
   };
 };
+export type AgentTrace = {
+  graph: string;
+  model: string;
+  intent: string;
+  tools: string[];
+  llm?: {
+    stub?: boolean;
+    local_rules?: boolean;
+    server_model?: string;
+    prompt_tokens?: number;
+    output_tokens?: number;
+    total_ms?: number;
+    output?: Record<string, unknown>;
+  } | null;
+};
 export type PlanConfirmation = {
   plan_id: string;
   phase: Plan["phase"];
   items: { section_id: string; status: "PENDING" | "ENROLLED" }[];
   submitted_at: string;
+  notification_id?: string | null;
 };
+export type TeachingSection = {
+  section_id: string;
+  term_id: string;
+  course_id: string;
+  code: string;
+  title: string;
+  section_no: string;
+  credits: number | string;
+  capacity: number;
+  enrolled_count: number;
+  school_name: string;
+  department_name: string;
+  meetings: Meeting[];
+};
+export type RosterEntry = {
+  enrollment_id: string;
+  student_no: string;
+  student_name: string;
+  score: string | null;
+  graded_at: string | null;
+};
+export type Roster = { section: TeachingSection; items: RosterEntry[]; as_of: string };
+export type GradeResult = { enrollment_id: string; score: string; graded_at: string; changed: boolean };
 
 export function newRequestKey() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));

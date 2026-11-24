@@ -232,7 +232,10 @@ function PlanReview({
         )}
         {result ? (
           <>
-            <p role="status">{result.items.length} 門{initial ? "已登記，等待分發。" : "已加選，正式課表已更新。"}</p>
+            <p role="status">
+              {result.items.length} 門{initial ? "已登記，等待分發。" : "已加選，正式課表已更新。"}
+              {!initial && result.notification_id && "選課確認信已排入寄送。"}
+            </p>
             <button onClick={() => onViewResult(result.phase)}>
               {initial ? "查看我的選課" : "查看我的課表"}
             </button>

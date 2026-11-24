@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import threading
 import time
 from datetime import datetime
 from ipaddress import ip_address, ip_network
@@ -13,6 +14,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
+from decimal import Decimal
 from pydantic import Field, model_validator
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import select, text
@@ -21,14 +23,23 @@ from starlette.concurrency import run_in_threadpool
 from .config import normalize_origin, settings
 from .db import get_db
 from .errors import DomainError
-from .auth import current_user, student_user, admin_user, COOKIE_NAME, login
+from .auth import current_user, student_user, admin_user, instructor_user, COOKIE_NAME, login
 from .models import Term, School, Department, Instructor, Course, AuthSession, NotificationOutbox, Topic
-from . import registration as reg, admin, voice
+from . import registration as reg, admin, voice, instructor as teaching
 from .admin import UUIDStr, StrictModel
 
 log = logging.getLogger('courses')
 logging.basicConfig(level=logging.INFO, format='%(message)s')
-app = FastAPI(title='大學選課與課程推薦系統', version='2.1.0')
+if settings.chat_stub:
+    log.warning('CHAT_STUB=true: the assistants use fixed test rules and do not call the local Llama model.')
+app = FastAPI(title='大學選課與課程推薦系統', version='3.0.0')
+
+
+@app.on_event('startup')
+def preload_speech_model():
+    # Load Whisper in the background so the first recording does not wait for it.
+    if settings.whisper_preload:
+        threading.Thread(target=voice.preload, name='whisper-preload', daemon=True).start()
 prefix = '/api/v1'
 LAN_NETWORKS = tuple(ip_network(cidr) for cidr in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
 
@@ -245,6 +256,7 @@ class PlanConfirmation(StrictModel):
     phase: Literal['INITIAL', 'ADD_DROP']
     items: list[PlanConfirmationItem]
     submitted_at: datetime
+    notification_id: UUIDStr | None = Field(default=None, description='ADD_DROP 提交建立的選課確認信事件。')
 
 
 @app.post(prefix + '/me/terms/{term_id}/selection-plans/{plan_id}/confirm', response_model=PlanConfirmation)
@@ -365,7 +377,8 @@ def allocation(term_id: UUIDStr, user=Depends(admin_user), db=Depends(get_db)):
 def notifications(term_id: UUIDStr, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100), user=Depends(admin_user), db=Depends(get_db)):
     reg.get_term(db, term_id, public=False)
     return {'items': [{'id': n.id, 'type': n.type, 'status': n.status, 'attempt_count': n.attempt_count,
-                       'next_attempt_at': n.next_attempt_at, 'sent_at': n.sent_at, 'last_error': n.last_error}
+                       'next_attempt_at': n.next_attempt_at, 'sent_at': n.sent_at, 'last_error': n.last_error,
+                       'provider_message_id': n.provider_message_id}
                       for n in db.scalars(select(NotificationOutbox).where(NotificationOutbox.term_id == term_id).order_by(NotificationOutbox.next_attempt_at.desc(), NotificationOutbox.id).offset((page - 1) * page_size).limit(page_size))]}
 
 
@@ -384,10 +397,11 @@ class ChatSource(StrictModel):
 
 
 class ChatEnrollment(StrictModel):
-    status: Literal['ENROLLED']
+    status: Literal['ENROLLED', 'DROPPED']
     term_id: UUIDStr
     enrollment_id: UUIDStr
     section_id: UUIDStr
+    course_code: str | None = None
     school_code: str
     school_name: str
     department_name: str
@@ -396,10 +410,20 @@ class ChatEnrollment(StrictModel):
     total_credits: str
     remaining: int
     submitted_at: datetime
+    notification_id: UUIDStr | None = Field(default=None, description='正式加選建立的確認信事件；退選為空。')
+
+
+class ChatAgent(StrictModel):
+    graph: str
+    model: str
+    intent: str
+    tools: list[str]
+    llm: dict | None = Field(default=None, description='本機模型伺服器回報的模型、token 數與耗時；CHAT_STUB 時為 {"stub": true}；'
+                                                       '完整句型由本機規則判讀、未呼叫模型時為 {"local_rules": true}。')
 
 
 class ChatOutput(StrictModel):
-    mode: Literal['simple_chat', 'sql_query', 'student_query', 'recommendation', 'clarify', 'add_course']
+    mode: Literal['simple_chat', 'sql_query', 'student_query', 'recommendation', 'clarify', 'add_course', 'drop_course']
     answer: str
     sources: list[ChatSource]
     as_of: datetime
@@ -409,6 +433,8 @@ class ChatOutput(StrictModel):
     registration: dict | None = None
     choices: list[dict] | None = None
     choice_total: int | None = None
+    choice_action: Literal['add', 'drop', 'apply'] | None = None
+    agent: ChatAgent | None = Field(default=None, description='LangGraph 流程（英文加退選或中文查詢）的模型、執行的工具與模型伺服器證據。')
     track_choices: list[dict] | None = None
     transcript: str | None = None
     transcript_status: Literal['CLEAR', 'UNCLEAR', 'SILENT'] | None = None
@@ -449,9 +475,36 @@ async def chat_voice(request: Request, request_key: RequestKey, user=Depends(stu
                                        track_context=track_code, deadline=deadline)
             return {'transcript': transcript, 'transcript_status': 'CLEAR', **result}
     except TimeoutError:
-        raise voice.unavailable() from None
+        if not transcript:
+            raise voice.unavailable() from None
+        # Speech was recognised; the assistant (usually the local model's first load) ran out of time.
+        from .chat import UNAVAILABLE_MESSAGES
+        raise DomainError(503, 'CHAT_UNAVAILABLE', UNAVAILABLE_MESSAGES['LLAMA_TIMEOUT'] + '辨識文字已保留，可稍後重送。',
+                          {'mode': 'unavailable', 'reason_code': 'LLAMA_TIMEOUT', 'transcript': transcript,
+                           'transcript_status': 'CLEAR'}) from None
     except DomainError as error:
         if not transcript:
             raise
         raise DomainError(error.status, error.code, error.message,
                           {'transcript': transcript, 'transcript_status': 'CLEAR', **(error.details or {})}) from None
+
+
+class GradeInput(StrictModel):
+    score: Decimal = Field(ge=0, le=100, max_digits=5, decimal_places=2, description='0–100，最多兩位小數。')
+
+
+@app.get(prefix + '/instructor/terms/{term_id}/sections')
+def instructor_sections(term_id: UUIDStr, user=Depends(instructor_user), db=Depends(get_db)):
+    return teaching.teaching_sections(db, user['instructor_id'], term_id)
+
+
+@app.get(prefix + '/instructor/terms/{term_id}/sections/{section_id}/roster')
+def instructor_roster(term_id: UUIDStr, section_id: UUIDStr, user=Depends(instructor_user), db=Depends(get_db)):
+    return teaching.roster(db, user['instructor_id'], term_id, section_id)
+
+
+@app.put(prefix + '/instructor/terms/{term_id}/sections/{section_id}/roster/{enrollment_id}/grade')
+def instructor_grade(term_id: UUIDStr, section_id: UUIDStr, enrollment_id: UUIDStr, body: GradeInput,
+                     user=Depends(instructor_user), db=Depends(get_db)):
+    with db.begin():
+        return teaching.set_grade(db, user, term_id, section_id, enrollment_id, body.score)
