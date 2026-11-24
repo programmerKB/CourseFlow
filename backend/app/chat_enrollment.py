@@ -18,7 +18,10 @@ from .errors import DomainError
 from .models import Course, CourseAlias, Department, School, Section
 
 
-COMMAND = re.compile(r'^(?:我(?:要|想)|請(?:幫我)?|幫我|麻煩(?:幫我)?)\s*加選\s*(.*)$')
+COMMAND = re.compile(
+    r'^(?:我(?:要|想(?:要)?)|請(?:幫我)?|幫我|麻煩(?:幫我)?)\s*'
+    r'(?P<action>加選|登記初選|初選登記|登記)\s*[:,]?\s*(?P<target>.*)$'
+)
 AMBIGUOUS = re.compile(r'["\'「」『』“”‘’?,，、;；\n]|(?:可以|能不能|可不可以|是否|不要|不用|不想|不必|別加選|取消|退選|和幫我|以及|然後|還有)|(?:嗎|呢|好嗎|行嗎)$')
 # Accept a separated class number or the common unseparated "A班" or "01班".
 CLASS_NUMBER = re.compile(r'(?:第([^第()]{1,32})班|班號\s*([a-z0-9_-]{1,32})|[\s(]+([a-z0-9_-]{1,32})班\)?|([a-z]|\d{1,8})班)$')
@@ -29,6 +32,7 @@ class Command:
     target: str
     school_code: str | None
     section_no: str | None
+    initial_only: bool
 
 
 def parse_command(message):
@@ -36,9 +40,10 @@ def parse_command(message):
     match = COMMAND.fullmatch(normalized)
     if not match:
         return None
-    target = match[1].strip()
+    target = match['target'].strip()
+    initial_only = match['action'] != '加選'
     if not target or AMBIGUOUS.search(target) or target in ('這個', '這門課', '這門', '那門課', '那門', '該課', '它'):
-        return Command('', None, None)
+        return Command('', None, None, initial_only)
 
     class_number = CLASS_NUMBER.search(target)
     number = None
@@ -49,7 +54,7 @@ def parse_command(message):
         if prefix and not prefix.endswith('-'):
             target, number = prefix, normalize_name(raw_number)
     target, school = school_prefix(normalize_name(target))
-    return Command(target, school, number)
+    return Command(target, school, number, initial_only)
 
 
 def fingerprint(term_id, channel, content, section_id=None):
@@ -115,7 +120,7 @@ def clarification(db, message, request_id, term=None, choices=None):
         result.update(
             choices=[{**{key: row[key] for key in (
                 'id', 'code', 'title', 'school_code', 'school_name', 'department_name', 'section_no',
-                'meetings', 'remaining', 'is_selectable',
+                'meetings', 'remaining', 'is_selectable', 'credits', 'instructor_name',
             )}, 'section_id': row['id']} for row in reg.section_rows(db, choices[:5])],
             choice_total=len(choices), registration=registration,
         )
@@ -131,16 +136,22 @@ def handle_command(user, command, term_id, request_key, digest, request_id, chan
             db.execute(text("SET LOCAL lock_timeout = '2s'"))
             db.execute(text("SET LOCAL statement_timeout = '2s'"))
             if term_id is None:
-                return clarification(db, '請先選擇要加選的學期。', request_id)
+                return clarification(db, '請先選擇學期。', request_id)
             term = reg.get_term(db, term_id, 'share')
             if not command.target:
-                return clarification(db, '請一次指定一門要加選的課，提供完整課名或課號。', request_id, term)
+                return clarification(db, '請一次指定一門課，提供完整課名或課號。', request_id, term)
             if not request_key:
                 raise DomainError(422, 'IDEMPOTENCY_KEY_REQUIRED', '直接加選需要 Idempotency-Key。')
             st = reg.student_term(db, user['student_id'], term_id, True)
             replay = reg.replay_response(db, st.student_id, term_id, request_key, digest)
             if replay is not None:
                 return replay[1]
+
+            phase = reg.phase(db, term)
+            if command.initial_only and phase != 'INITIAL':
+                raise DomainError(409, 'REGISTRATION_CLOSED', '目前未開放初選登記。', {
+                    'registration': reg.registration_status(db, term), 'sources': [source(term_id)],
+                })
 
             exact, partial = section_matches(db, term, command)
             candidates = exact or partial
@@ -151,6 +162,11 @@ def handle_command(user, command, term_id, request_key, digest, request_id, chan
             elif len(exact) == 1:
                 section_id = exact[0]
             else:
+                section_id = None
+            if phase == 'INITIAL' and candidates:
+                return clarification(db, '目前是初選，請選擇班別並確認登記。', request_id, term,
+                                     [section_id] if section_id is not None else candidates)
+            if section_id is None:
                 message = ('找到多個同名班別，請選擇校系及班號。' if len(exact) > 1 else
                            '請從搜尋結果指定完整班別。' if partial else '這個學期查不到符合指令的班別。')
                 return clarification(db, message, request_id, term, candidates)

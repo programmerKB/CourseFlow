@@ -26,13 +26,26 @@ if args[0] == 'inspect':
         print('running|' + ('healthy' if service in ('db', 'api') else 'none'))
     sys.exit(0)
 assert args.pop(0) == 'compose'
-while args and args[0] in ('--project-directory', '--file', '--env-file'):
+https = False
+while args and args[0] in ('--project-directory', '--file', '--env-file', '--profile'):
+    if args[:2] == ['--profile', 'https']:
+        https = True
     args = args[2:]
 action, *options = args
-if action == 'run' and failure == 'migration':
+if action == 'config' and options == ['--services']:
+    print('db\nmailpit\nmigrate\napi\nworker\nfrontend')
+    if https:
+        print('https')
+if action == 'run' and 'migrate' in options and failure == 'migration':
     print('simulated migration failure', file=sys.stderr)
     sys.exit(9)
-if action == 'exec' and '-c' in options and failure == 'http':
+if action == 'run' and 'initial-period' in options and failure == 'dates':
+    print('simulated initial date validation failure', file=sys.stderr)
+    sys.exit(10)
+if action == 'run' and options[-3:] == ['https', 'nginx', '-t'] and failure == 'tls':
+    print('simulated invalid certificate', file=sys.stderr)
+    sys.exit(11)
+if action == 'exec' and any('http://frontend/api/v1/terms' in value for value in options) and failure == 'http':
     sys.exit(1)
 if action == 'ps':
     if '--quiet' in options:
@@ -40,8 +53,8 @@ if action == 'ps':
     else:
         print('service status summary')
 if action == 'port':
-    print({'frontend': '[::]:19080\n0.0.0.0:19080',
-           'api': '127.0.0.1:18000', 'mailpit': '0.0.0.0:18025'}[options[0]])
+    print({('frontend', '80'): '[::]:19080\n0.0.0.0:19080', ('https', '443'): '[::]:18443',
+           ('api', '8000'): '127.0.0.1:18000', ('mailpit', '8025'): '0.0.0.0:18025'}[tuple(options)])
 '''
 
 
@@ -77,11 +90,15 @@ class DeployTests(unittest.TestCase):
         self.assertEqual((self.project / '.env').read_text(), (self.project / '.env.example').read_text())
         self.assertEqual((self.project / '.env').stat().st_mode & 0o777, 0o600)
         calls = self.calls()
-        migration = next(i for i, c in enumerate(calls) if 'run' in c)
+        validation = next(i for i, c in enumerate(calls) if 'initial-period' in c and '--check' in c)
+        migration = next(i for i, c in enumerate(calls) if 'run' in c and 'migrate' in c)
         stopping = next(i for i, c in enumerate(calls) if 'stop' in c)
         seeding = next(i for i, c in enumerate(calls) if 'app.seed' in c)
+        applying = next(i for i, c in enumerate(calls) if 'initial-period' in c and 'exec' in c)
+        self.assertLess(validation, stopping)
         self.assertLess(stopping, migration)
         self.assertLess(migration, seeding)
+        self.assertLess(seeding, applying)
         self.assertIn('awaiting', calls[seeding])
         self.assertTrue(any('exec' in c and '-c' in c and 'http://frontend/api/v1/terms' in c[-1] for c in calls))
         for url in ('http://localhost:19080', 'http://localhost:18000/docs', 'http://localhost:18025'):
@@ -98,7 +115,8 @@ class DeployTests(unittest.TestCase):
         self.assertEqual((self.project / '.env').read_text(), env_content)
         self.assertFalse(marker.exists())
         calls = self.calls()
-        self.assertEqual(sum('run' in c for c in calls), 2)
+        self.assertEqual(sum('run' in c and 'migrate' in c for c in calls), 2)
+        self.assertEqual(sum('exec' in c and 'initial-period' in c for c in calls), 2)
         self.assertFalse(any('app.seed' in c or 'build' in c for c in calls))
         self.assertFalse(any(set(c) & {'down', 'prune', 'volume', 'volumes', '-v'} for c in calls))
 
@@ -130,6 +148,46 @@ class DeployTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('代理未能', result.stderr)
         self.assertNotIn('部署完成。', result.stdout)
+
+    def test_https_deployment_uses_one_compose_file_and_reports_port(self):
+        tls = self.project / '.tls'
+        tls.mkdir()
+        for filename in ('server.crt', 'server.key'):
+            (tls / filename).touch()
+        result = self.run_deploy('--skip-seed', '--https')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('https://localhost:18443', result.stdout)
+        config = next(call for call in self.calls() if 'config' in call)
+        self.assertEqual(config.count('--file'), 1)
+        self.assertEqual(config[config.index('--profile') + 1], 'https')
+        calls = self.calls()
+        validate = next(i for i, call in enumerate(calls) if call[-3:] == ['https', 'nginx', '-t'])
+        stop = next(i for i, call in enumerate(calls) if 'stop' in call)
+        self.assertLess(validate, stop)
+        self.assertTrue(any('up' in call and call[-1] == 'https' for call in self.calls()))
+
+    def test_missing_tls_files_fail_before_restarting_services(self):
+        result = self.run_deploy('--https')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('.tls/server.crt', result.stderr)
+        self.assertFalse(any('stop' in call or 'up' in call for call in self.calls()))
+
+    def test_invalid_tls_files_keep_the_running_application(self):
+        tls = self.project / '.tls'
+        tls.mkdir()
+        for filename in ('server.crt', 'server.key'):
+            (tls / filename).write_text('invalid')
+        result = self.run_deploy('--https', failure='tls')
+        self.assertEqual(result.returncode, 11)
+        self.assertIn('驗證 HTTPS 憑證與代理設定', result.stderr)
+        self.assertFalse(any('stop' in call or 'up' in call for call in self.calls()))
+
+    def test_invalid_initial_dates_keep_the_running_application(self):
+        (self.project / '.env').write_text('INITIAL_START_AT=invalid\nINITIAL_END_AT=2026-11-30T23:59:00+08:00\n')
+        result = self.run_deploy('--skip-seed', failure='dates')
+        self.assertEqual(result.returncode, 10)
+        self.assertIn('確認初選時段', result.stderr)
+        self.assertFalse(any('stop' in call or ('run' in call and 'migrate' in call) for call in self.calls()))
 
     def test_daemon_failure_creates_no_environment_file(self):
         result = self.run_deploy(failure='daemon')

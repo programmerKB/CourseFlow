@@ -281,7 +281,7 @@ flowchart TD
 | 模式 | 使用情境 | 工具及資料來源 |
 |---|---|---|
 | `simple_chat` | 「初選登記完會立刻選上嗎？」 | 以版本化專題規則回答。問到實際日期時由 `get_registration_status` 查學期時段。 |
-| `sql_query` | 「找這學期星期二還有空位的電子系課。」 | `query_public_courses`。Gemini 產生符合 schema 的查詢計畫，列出篩選條件及排序，工具執行對應參數化 SQL。 |
+| `sql_query` | 「找這學期星期二還有空位的電子系課。」 | `query_public_courses`。後端可從固定問法取得星期、系所和空位條件。其他問法由 Gemini 產生符合 schema 的查詢計畫。工具執行對應的參數化 SQL。 |
 | `student_query` | 「我星期三有課嗎？」、「我剛剛選了什麼？」或「我現在能加選資料庫設計嗎？」 | 查本人課表、初選結果或資格。「我剛剛選了什麼？」以後端句型解析，分列待分發及正式選課，附本人頁面連結。 |
 | `recommendation` | 「我的研究方向是大型語言模型，幫我選三門相關課。」或「我是電子系學生，給我修課建議。」 | 從公開課程依研究主題或系所找候選。後端依登入者的課表與限制產生可確認草案。 |
 | `recommendation`（FR-20 擴充） | 「我想做 RF，這學期先修什麼，以後能做什麼專題？」 | 辨識研究方向，讀取 §12.1 的路徑。查詢選定學期班別與本人修課紀錄，回傳分階段建議，詳見 §7.7。 |
@@ -348,7 +348,7 @@ FR-20 的分階段修課諮詢依 §7.7 回傳路徑。這類諮詢在收到試�
 
 本節為 FR-15–16 的擴充。`v1.0.0` 的文字助理提供查詢、試排及前往選課入口，由學生介面送出選課。
 
-學生在助理選好學期後，可打字或說「我要加選資料庫設計」。助理在指定學期找到唯一一班、且學生符合即時加選規則時，當次請求就完成加選並更新「我的課表」。學生送出這句話即表示要執行加選。
+學生在助理選好學期後，可打字或說「我要加選資料庫設計」。在即時加退選期間，助理找到唯一一班且學生符合規則時，當次請求完成加選並更新「我的課表」。初選期間由學生確認登記。
 
 | 輸入或情況 | 助理的動作 |
 |---|---|
@@ -357,7 +357,8 @@ FR-20 的分階段修課諮詢依 §7.7 回傳路徑。這類諮詢在收到試�
 | 「這門課可以加選嗎？」或「我不要加選這門課」 | 回傳查詢或說明，維持現有課表。 |
 | 「我的研究方向是大語言模型，幫我選三門」 | 回傳推薦與可確認的試排草案，依 §7.3–7.4 處理。 |
 | 唯一班別但額滿、衝堂、先修不足、超學分或已選 | 回傳對應錯誤及學生可檢查的資訊。 |
-| 目前是初選、待分發或已截止 | 回 `409 REGISTRATION_CLOSED`，並顯示目前階段及加退選時程。初選期間提供初選登記入口。 |
+| 目前是初選 | 回傳候選班別與時程。學生點「登記此班」並確認後，透過初選登記介面提交。 |
+| 目前待分發或已截止 | 回 `409 REGISTRATION_CLOSED`，並顯示目前階段及選課時程。 |
 
 1. **辨識指令。** 後端用明確的指令式樣，例如「我要加選」「幫我加選」「請加選」，搭配一門課的名稱或課號進入直接加選。引用、疑問、否定、含糊代詞或一次提及多門課時，回查詢、釐清或試排。登入學生及畫面選定的 `term_id` 決定操作範圍。缺少學期時請學生選學期。只有完成比對的後端節點會呼叫交易服務。
 2. **指定班別。** 正規化全半形、空白和英文字母大小寫。以別名表把「台科大」「NTUST」對應至臺科大，把「電子系」對應至指定學校的電子工程系。依課號、完整課名或已建置的課程別名查找，再套用指令明示的校系、班號。比對涵蓋選定學期全部公開候選。多筆命中時回 `mode=clarify` 與 `choices`。部分字串結果也可供挑選，待學生指定班別後提交。`choices` 含班別 ID、校系、名稱、班號、時段及剩餘名額，依課程代碼與班號排序，最多回 5 筆及查詢入口。
@@ -371,11 +372,11 @@ FR-20 的分階段修課諮詢依 §7.7 回傳路徑。這類諮詢在收到試�
 | 操作或技術 | 首版要求 |
 |---|---|
 | 麥克風介面 | 助理提供「開始錄音」、「停止並送出」與「取消」。錄音時顯示圖示與秒數。只有送出的最終錄音進入辨識。送出時也支援鍵盤操作。 |
-| 瀏覽器錄音 | React 透過 `getUserMedia` 與 `MediaRecorder` 擷取音訊。部署使用 HTTPS，本機以 `localhost` 展示。用 `MediaRecorder.isTypeSupported()` 選用 WebM/Opus、MP4/AAC 或 Ogg/Opus。錄滿 20 秒時停止收音，等學生送出或取消。 |
+| 瀏覽器錄音 | React 在受信任的 HTTPS 或 localhost 透過 `getUserMedia` 與 `MediaRecorder` 擷取音訊。用 `MediaRecorder.isTypeSupported()` 選用 WebM/Opus、MP4/AAC 或 Ogg/Opus。錄滿 20 秒時停止收音，等學生送出或取消。也可從裝置選擇 WebM、M4A、MP4、Ogg、WAV 或 MP3 音檔，區網 HTTP 同樣可用。 |
 | 上傳與轉寫 | 每次至多 20 秒、5 MiB。FastAPI 驗證後以 FFmpeg 轉成 16 kHz 單聲道 WAV，送至支援音訊輸入的 `GEMINI_AUDIO_MODEL`，以繁體中文轉寫並保留英文縮寫、課號及班號。轉寫上限 20 秒，整次語音請求上限 30 秒。 |
-| 共享指令流程 | 顯示辨識到的指令或問題。清楚的單門加選轉入 §7.5，唯一命中時直接加選。辨識不清時顯示已辨識文字，供重錄或改用文字輸入。一般查詢及推薦可用語音觸發相同助理功能。 |
+| 共享指令流程 | 顯示辨識到的指令或問題。初選期間顯示可確認登記的班別。加退選期間清楚的單門加選轉入 §7.5。辨識後可把文字放回輸入框修正。語音試排可帶入前一個研究方向。 |
 | 朗讀回覆 | 可按「朗讀回覆」。瀏覽器支援 `SpeechSynthesis` 時，以 `zh-TW` 朗讀加選成功訊息、候選或失敗原因。畫面始終顯示完整文字結果。 |
-| 權限及故障 | 麥克風未授權或瀏覽器不支援時提示改用文字。靜音或不清楚回 `422 VOICE_UNCLEAR`。檔案太大回 `413`，不支援格式回 `415`，辨識服務異常回 `503 VOICE_UNAVAILABLE`。 |
+| 權限及故障 | 麥克風未授權或瀏覽器不支援時，可選擇音檔或使用文字輸入。靜音或不清楚回 `422 VOICE_UNCLEAR`。檔案太大回 `413`，不支援格式回 `415`，辨識服務異常回 `503 VOICE_UNAVAILABLE`。 |
 
 錄音介面顯示錄音會送往 Gemini 辨識。轉寫回傳 `transcript` 與清晰、含糊或靜音狀態，保留能辨識到的課名及班號。前端在結束錄音或離開頁面時釋放麥克風。系統處理完畢即清除音訊與轉寫暫存。可重播的成功回應保存選課結果及辨識到的加選指令所對應的標準化校系、課名與班號。
 
@@ -405,15 +406,15 @@ FR-20 的分階段修課諮詢依 §7.7 回傳路徑。這類諮詢在收到試�
 | Frontend | React＋TypeScript＋Vite，透過 Nginx 代理同源 `/api/v1`。提供公開查課、學期狀態、週課表、寄送按鈕和推薦卡。為需要冪等的異動產生重送鍵，遇暫時錯誤保留原鍵。三校篩選及錄音依 FR-14–16 擴充。 |
 | Backend | Python 3.12、FastAPI、Pydantic、SQLAlchemy 2.x、Alembic。登入、選課、試排與寄送共用授權和交易服務。語音擴充由 `python-multipart` 收檔並以 FFmpeg 轉檔。 |
 | Database | PostgreSQL 16，獨立 DB volume。migration、應用與 Agent 使用用途對應的資料庫權限。公開 View 用於 Agent 查課，正式選課使用交易服務。 |
-| Authentication | 密碼採 Argon2id，Session 使用 `HttpOnly`、`SameSite=Lax` Cookie，儲存 Token 雜湊。寫入來源透過 `APP_ORIGIN` 與 `APP_ALLOWED_ORIGINS` 驗證。HTTPS 以 `COOKIE_SECURE=true` 啟用 Secure Cookie。 |
-| Docker Compose | `db` 通過 TCP 健康檢查後由一次性 `migrate` 執行 migration。API 就緒後，前端服務代理 API。`worker` 背景處理 Email，`mailpit` 供本機測試。PostgreSQL 以 `course_db` volume 保存。 |
-| 設定 | `.env.example` 提供資料庫角色、`PUBLIC_INITIAL_TERM_ID`、瀏覽器來源、`GEMINI_MODEL`、`GEMINI_API_KEY`、`CHAT_STUB` 與 SMTP。`GEMINI_AUDIO_MODEL` 配合語音擴充新增。Gemini 暫時不可用時，公開查課、手動選課、課表寄送及固定的本人查詢仍可運作。 |
+| Authentication | 密碼採 Argon2id，Session 使用 `HttpOnly`、`SameSite=Lax` Cookie，儲存 Token 雜湊。本機回環與區網私有 IPv4 支援同源寫入，自訂網域透過 `APP_ORIGIN` 與 `APP_ALLOWED_ORIGINS` 設定。HTTPS 以 `COOKIE_SECURE=true` 啟用 Secure Cookie。 |
+| Docker Compose | `db` 通過 TCP 健康檢查後由一次性 `migrate` 執行 migration。API 就緒後，前端服務代理 API。`worker` 背景處理 Email，`mailpit` 供本機測試。選用的 `https` 服務與其他服務共用同一份 `compose.yaml`。PostgreSQL 以 `course_db` volume 保存。 |
+| 設定 | `.env.example` 提供 115-1 的 `INITIAL_START_AT` 與 `INITIAL_END_AT`，以及資料庫角色、`PUBLIC_INITIAL_TERM_ID`、瀏覽器來源、Gemini 模型及 SMTP。部署時驗證初選日期並套用至 PostgreSQL。Gemini 暫時不可用時，公開查課、手動選課、課表寄送及固定的本人查詢仍可運作。 |
 | 故障與效能 | 提供存活及資料庫就緒端點。使用結構化 log 和 `request_id`。一般課程搜尋在 1,000 個班別、20 個並行查詢下，以本機暖機後 p95 ≤ 500 ms 作為驗證目標，測試報告記錄機器與資料規模。 |
 
 ### 8.1 部署、更新與區網使用
 
 - `deploy.sh` 依序驗證 Compose 設定、建置服務、等待資料庫就緒、執行 migration、啟動及檢查 API、執行選定 seed，最後啟動前端與 Worker。首次部署以 `.env.example` 補上缺少的環境檔。既有部署可用 `--skip-seed` 更新並沿用資料庫 volume，另提供 `--scenario`、`--no-build`、`--env-file` 和 `--timeout`。更新時服務在 migration 階段短暫停止。[部署腳本](https://github.com/programmerKB/CourseFlow/blob/5db2f3e063a7428846a82e61bdb1b0de5e64e6f2/deploy.sh) · [部署指引](https://github.com/programmerKB/CourseFlow/blob/5db2f3e063a7428846a82e61bdb1b0de5e64e6f2/README.md#L9-L69)
-- 預設服務入口為選課系統 `8080`、API 文件 `8000/docs`、Mailpit `8025`。API 提供 `/health/live` 與 `/health/ready`。由 VM 或區網登入時，將實際瀏覽器來源加入 `APP_ORIGIN` 或 `APP_ALLOWED_ORIGINS`。`APP_ORIGIN` 同時用於 Email 連結。前端的冪等鍵支援區網 HTTP 展示。語音擴充使用 §7.6 的 HTTPS 或 localhost 環境。[區網設定](https://github.com/programmerKB/CourseFlow/blob/5db2f3e063a7428846a82e61bdb1b0de5e64e6f2/README.md#L58-L81) · [前端 API 客戶端](https://github.com/programmerKB/CourseFlow/blob/5db2f3e063a7428846a82e61bdb1b0de5e64e6f2/frontend/src/api.ts#L150-L207)
+- 預設服務入口為選課系統 `8080`、API 文件 `8000/docs`、Mailpit `8025`。API 提供 `/health/live` 與 `/health/ready`。`APP_ORIGIN` 用於 Email 連結。前端的冪等鍵及音檔上傳支援區網 HTTP。可用 `deploy.sh --https` 加開 HTTPS 入口供網頁錄音。[區網設定](README.md#從區網登入) · [區網 HTTPS 設定](README.md#讓區網使用網頁麥克風)
 - Linux 本機開發也可用 `scripts/setup-local.sh`、`scripts/run-local.sh` 啟動前後端與本機 PostgreSQL。示範資料含一位管理員、二十位虛構學生、固定課程與完整時段。以多學期示範驗證額滿、最後一席、同課不同班、先修、衝堂及選課階段。三校展示學期另依 FR-14 補上 §1.1 的 40 筆資料。[種子與展示資料](https://github.com/programmerKB/CourseFlow/blob/5db2f3e063a7428846a82e61bdb1b0de5e64e6f2/README.md#L90-L126) · [本機開發](https://github.com/programmerKB/CourseFlow/blob/5db2f3e063a7428846a82e61bdb1b0de5e64e6f2/README.md#L305-L318)
 
 ## 9. 驗收測試
@@ -444,7 +445,7 @@ API 與併發測試必須連接 PostgreSQL。使用固定測試時間、學期�
 | AT-20 | 載入 §1.1 三校課程，以校別、系所與主題交叉查詢，再查同名的高等計算機結構。 | 40 筆參考課程主檔均有校系、標籤及官方連結。各校系同名課具有不同代碼，三校課程可被推薦查詢取得。 |
 | AT-21 | 即時加退選期間輸入「我要加選臺科大電子系的高等計算機結構」。另用專題課號測試。 | 授權學生在原請求內完成加選，課表新增該班、扣一個名額並增加學分。 |
 | AT-22 | 輸入未限定校系的同名課、同課兩班、部分課名，或輸入「我可以加選資料庫設計嗎？」與否定句。 | 依情況顯示校系及班號讓學生指定，或只回答問題。選課紀錄維持原狀，學生明確選定候選後才提交。 |
-| AT-23 | 對唯一可辨識班別分別測試額滿、衝堂、缺先修、學分超限、重複選課，以及初選或截止時段。 | 文字與語音共用的交易回正確失敗原因，課表及通知零筆新增。初選階段可轉至登記入口。 |
+| AT-23 | 對唯一可辨識班別分別測試額滿、衝堂、缺先修、學分超限、重複選課，以及初選或截止時段。 | 即時加選回對應原因。初選可從候選班別確認登記，確認後課表顯示待分發。 |
 | AT-24 | 用瀏覽器麥克風說出 AT-21 的指令，按「停止並送出」。用真實 Gemini 驗證一次，並使用清楚錄音 fixture 做自動化回歸。 | 顯示辨識文字與加選成功班別，課表新增該班。支援朗讀的瀏覽器可播放結果。 |
 | AT-25 | 取消錄音、拒絕麥克風權限、上傳靜音或超限檔，或模擬辨識逾時。 | 取消時無 API 寫入。其餘情境顯示失敗原因與重錄或文字入口，課表維持原狀。音訊資料沒有寫入資料庫或日誌。 |
 | AT-26 | 用文字、語音和手動操作同時競爭最後一席。重送勝出請求。另用相同鍵值和不同音訊重送曾成功的語音加選。 | 一次錄取及一筆選課稽核。其他有效競爭請求回 `SECTION_FULL`。原鍵原內容重播成功結果，改用不同內容回 `409 IDEMPOTENCY_KEY_REUSED`。 |

@@ -19,7 +19,7 @@ from .gemini_rest import generate_content
 from .seed import uid
 
 
-COURSE_QUESTION = '找這學期星期二還有空位的電子系課'
+COURSE_QUESTION = '電子系本學期有哪些在星期二上課、而且還有空位的班別？'
 RESEARCH_QUESTION = '我的研究方向是大語言模型，請推薦這學期相關的課，幫我選三門。'
 REFERENCE_COURSES = ('DEMO-501', 'DEMO-502', 'DEMO-503', 'DEMO-504', 'DEMO-505')
 

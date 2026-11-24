@@ -28,6 +28,13 @@ def add(db, model, key, **values):
     return row
 
 
+def seed_demo_instructor(db, code, school_code, department_id):
+    instructor_id = uid('teacher/' + code)
+    add(db, Instructor, instructor_id, id=instructor_id, department_id=department_id,
+        name=f'{SCHOOLS[school_code][0]} - 示範教師')
+    return instructor_id
+
+
 def seed_section(db, slug, code, section_no, instructor_id, capacity, meetings, *,
                  required_codes=(), is_selectable=True):
     term_id, course_id = uid('term/' + slug), uid('course/' + code)
@@ -189,8 +196,7 @@ def seed_university_catalog(db, current, history, *, separate_term=False):
             department_id = uid('department/' + group)
             add(db, Department, department_id, id=department_id, school_id=school_id,
                 code=department_code, name=name)
-        teacher_id = uid('teacher/' + group)
-        add(db, Instructor, teacher_id, id=teacher_id, name=f'{group} 示範教師', department_id=department_id)
+        teacher_id = seed_demo_instructor(db, group, school, department_id)
         for number, (title, tags, url) in enumerate(rows, 1):
             code = f'{group}-{number:03d}'
             course_id = uid('course/' + code)
@@ -246,8 +252,8 @@ def seed(mode='add-drop', *, recommendation_demo=False, university_demo=False, i
                 password_hash=password, role='STUDENT', display_name=f'示範同學 {n:02}')
             add(db, Student, uid('student/' + login), id=uid('student/' + login), user_id=uid('user/' + login),
                 name=f'示範同學 {n:02}', student_no=f'B115{n:05}', department_id=cs if n <= 10 else ee)
-        for code, name, dep in [('chen', '陳明哲', cs), ('lin', '林雅涵', cs), ('wang', '王志遠', ee), ('huang', '黃思穎', ee)]:
-            add(db, Instructor, uid('teacher/' + code), id=uid('teacher/' + code), name=name, department_id=dep)
+        for code, dep in [('chen', cs), ('lin', cs), ('wang', ee), ('huang', ee)]:
+            seed_demo_instructor(db, code, 'NTUST', dep)
         courses = [
             ('CS101', '程式設計', cs, '建立 Python 程式設計、問題分解與基礎演算法能力。'),
             ('CS201', '資料結構', cs, '探討串列、樹、雜湊與圖的資料表示及演算法效率。'),

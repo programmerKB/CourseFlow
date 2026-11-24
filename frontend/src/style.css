@@ -923,6 +923,10 @@ td {
 .voice-controls > .error {
   flex-basis: 100%;
 }
+.voice-file {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .recording-dot {
   display: inline-block;
   width: 0.55rem;

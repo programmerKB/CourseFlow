@@ -1,7 +1,7 @@
 from functools import lru_cache
 import logging
 from uuid import UUID
-from pydantic import AnyHttpUrl, SecretStr, field_validator, model_validator
+from pydantic import AnyHttpUrl, AwareDatetime, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -15,7 +15,7 @@ def normalize_origin(value: str) -> str:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', extra='ignore')
+    model_config = SettingsConfigDict(env_file='.env', extra='ignore', hide_input_in_errors=True)
     database_url: str = 'postgresql+psycopg://course_app:course_app@localhost:5432/courses'
     public_database_url: str = 'postgresql+psycopg://course_public:course_public@localhost:5432/courses'
     database_password: SecretStr | None = None
@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     app_allowed_origins: str = ''
     cookie_secure: bool = False
     public_initial_term_id: str = ''
+    initial_start_at: AwareDatetime | None = None
+    initial_end_at: AwareDatetime | None = None
     session_hours: int = 24
     gemini_model: str = 'gemini-3.5-flash-lite'
     gemini_audio_model: str = 'gemini-3.5-flash-lite'
@@ -55,6 +57,21 @@ class Settings(BaseSettings):
     def validate_public_initial_term_id(cls, value: str) -> str:
         value = value.strip()
         return str(UUID(value)) if value else ''
+
+    @field_validator('initial_start_at', 'initial_end_at', mode='before')
+    @classmethod
+    def optional_initial_date(cls, value):
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    @model_validator(mode='after')
+    def validate_initial_window(self):
+        if (self.initial_start_at is None) != (self.initial_end_at is None):
+            raise ValueError('INITIAL_START_AT 與 INITIAL_END_AT 須同時設定。')
+        if self.initial_start_at is not None and self.initial_start_at >= self.initial_end_at:
+            raise ValueError('INITIAL_START_AT 須早於 INITIAL_END_AT。')
+        return self
 
     @model_validator(mode='after')
     def apply_database_passwords(self):

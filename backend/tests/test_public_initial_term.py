@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from conftest import FIXED, signin
-from app import chat
+from app import chat, voice
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Application, RegistrationPeriod
@@ -56,6 +56,20 @@ def test_scoped_term_accepts_initial_applications_and_disables_add_drop(client, 
         period.starts_at = FIXED - timedelta(days=1)
         period.ends_at = FIXED + timedelta(days=1)
     assert client.get(registration).json()['phase'] == 'INITIAL'
+    message = '我要登記初選 CS101 A班'
+    text = client.post('/api/v1/chat', json={'message': message}, headers={'Idempotency-Key': 'scope-text'})
+    assert text.status_code == 200, text.text
+    assert [choice['section_id'] for choice in text.json()['choices']] == [MAIN_SECTION]
+
+    async def recognize(*args):
+        return message
+
+    monkeypatch.setattr(voice, 'recognize', recognize)
+    audio = client.post('/api/v1/chat/voice', files={'audio': ('fixture.webm', b'fixture', 'audio/webm')},
+                        headers={'Idempotency-Key': 'scope-voice'})
+    assert audio.status_code == 200, audio.text
+    assert [choice['section_id'] for choice in audio.json()['choices']] == [MAIN_SECTION]
+
     apply = client.put(f'/api/v1/me/terms/{MAIN}/applications/{MAIN_SECTION}')
     assert apply.status_code == 200 and apply.json()['status'] == 'PENDING'
 

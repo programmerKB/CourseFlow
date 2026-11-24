@@ -7,7 +7,7 @@ async function login(page: Page, name = "student01") {
   await dialog.getByRole("button", { name: "登入帳號", exact: true }).click();
   await expect(dialog).toBeHidden();
 }
-test("訪客查課、學生加退選、課表、初選登記與助理", async ({ page }) => {
+test("訪客查課、學生加退選、課表、初選登記與助理", async ({ page }, testInfo) => {
   const errors: string[] = [];
   // Browsers accessing the VM over plain HTTP have no randomUUID().
   await page.addInitScript(() => Object.defineProperty(crypto, "randomUUID", { value: undefined }));
@@ -17,7 +17,7 @@ test("訪客查課、學生加退選、課表、初選登記與助理", async ({
     page.getByRole("heading", { name: "找到適合你的課程" }),
   ).toBeVisible();
   await expect(page.locator("tbody tr")).toHaveCount(12);
-  await page.screenshot({ path: "../docs/desktop.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("desktop.png"), fullPage: true });
   await page.getByLabel("課程名稱或代碼").fill("資料庫");
   await expect(page.locator("tbody tr")).toHaveCount(1);
   await page.getByRole("button", { name: "資料庫設計", exact: true }).click();
@@ -41,7 +41,7 @@ test("訪客查課、學生加退選、課表、初選登記與助理", async ({
   await page.getByRole("button", { name: "關閉訊息" }).click();
   await page.getByRole("button", { name: "我的課表", exact: true }).click();
   await expect(page.locator(".class-block")).toHaveCount(2);
-  await page.screenshot({ path: "../docs/timetable.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("timetable.png"), fullPage: true });
   await page.getByRole("button", { name: "退選", exact: true }).click();
   await page
     .getByRole("dialog")
@@ -125,7 +125,7 @@ test("管理員可瀏覽分發與通知並調整容量", async ({ page }) => {
     .click();
   await expect(page.getByRole("alert")).toContainText("班別已儲存");
 });
-test("手機介面可操作且主頁無水平溢出", async ({ page }) => {
+test("手機介面可操作且主頁無水平溢出", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/courses");
   await expect(page.locator("tbody tr")).toHaveCount(12);
@@ -134,7 +134,7 @@ test("手機介面可操作且主頁無水平溢出", async ({ page }) => {
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBeTruthy();
-  await page.screenshot({ path: "../docs/mobile.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("mobile.png"), fullPage: true });
   await page.getByRole("button", { name: "選課規則", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "從登記，到正式選課" }),

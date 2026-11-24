@@ -1,3 +1,5 @@
+from urllib.parse import urlsplit
+
 import pytest
 from pydantic import ValidationError
 
@@ -44,3 +46,28 @@ def test_lan_login_uses_allowlist_and_keeps_origin_guard(client, monkeypatch):
         assert response.status_code == 403
         assert response.json()['code'] == 'ORIGIN_FORBIDDEN'
     assert client.get('/api/v1/auth/me').status_code == 401
+
+
+def test_local_addresses_can_log_in_without_editing_the_allowlist(client, monkeypatch):
+    monkeypatch.setattr(settings, 'app_origin', 'https://courses.example')
+    monkeypatch.setattr(settings, 'app_allowed_origins', '')
+    for origin in ('http://localhost:8080', 'http://127.0.0.1:8080', LAN_ORIGIN,
+                   'https://localhost:8443', 'https://192.168.0.150:8443'):
+        # The API receives HTTP from Nginx, while browsers on HTTPS send Fetch Metadata.
+        headers = {'Host': urlsplit(origin).netloc, 'Origin': origin}
+        if origin.startswith('https:'):
+            headers['Sec-Fetch-Site'] = 'same-origin'
+        result = client.post('/api/v1/auth/login', headers=headers,
+                             json={'login': 'student01', 'password': 'Demo123!'})
+        assert result.status_code == 200
+        assert client.post('/api/v1/auth/logout', headers=headers).status_code == 204
+
+    for origin, host, extra in (
+        (LAN_ORIGIN, '192.168.0.150:8081', {}),
+        ('https://192.168.0.150:8080', '192.168.0.150:8080', {'X-Forwarded-Proto': 'https'}),
+        ('http://foreign.example:8080', 'foreign.example:8080', {'Sec-Fetch-Site': 'same-origin'}),
+        (LAN_ORIGIN, '192.168.0.150:8080', {'Sec-Fetch-Site': 'cross-site'}),
+    ):
+        result = client.post('/api/v1/auth/login', headers={'Origin': origin, 'Host': host, **extra}, json={})
+        assert result.status_code == 403
+        assert result.json()['code'] == 'ORIGIN_FORBIDDEN'

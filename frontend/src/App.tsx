@@ -42,7 +42,7 @@ type View =
   | "rules";
 type Mutation = (path: string, method: string, body?: unknown) => Promise<any>;
 type TextChat = { kind: "text"; text: string; sectionId?: string; trackCode?: string; key: string; signature: string };
-type VoiceChat = { kind: "voice"; audio: Blob; key: string };
+type VoiceChat = { kind: "voice"; audio: Blob; trackCode?: string; key: string };
 type ChatAttempt = TextChat | VoiceChat;
 type ChatMessage = Partial<ChatResponse> & {
   role: "user" | "assistant";
@@ -251,12 +251,14 @@ export default function App() {
     [check, setCheck] = useState<Eligibility | null>(null),
     [checking, setChecking] = useState(false);
   const [confirmation, setConfirmation] = useState<{
-    section: Section;
+    section: Pick<Section, "id" | "code" | "title" | "credits" | "instructor_name" | "meetings">;
     action: "apply" | "cancel" | "add" | "drop";
   } | null>(null);
   const [chatInput, setChatInput] = useState(""),
     [chatBusy, setChatBusy] = useState(false),
     [messages, setMessages] = useState<ChatMessage[]>([]);
+  const lastTrackCode = messages.slice().reverse().find((m) => m.recommendation?.roadmap)
+    ?.recommendation?.roadmap?.track_code;
   const chatRequest = useRef<AbortController | null>(null);
   const chatKeys = useRef(new Map<string, string>());
   const eligibilityRequest = useRef<AbortController | null>(null);
@@ -669,8 +671,7 @@ export default function App() {
   function ask(text = chatInput, sectionId?: string, trackCode?: string) {
     text = text.trim();
     if (!text || chatRequest.current) return;
-    const lastRoadmap = messages.slice().reverse().find((m) => m.recommendation?.roadmap)?.recommendation?.roadmap;
-    const track = trackCode ?? lastRoadmap?.track_code;
+    const track = trackCode ?? lastTrackCode;
     const signature = JSON.stringify([text, sectionId, track]);
     const key = chatKeys.current.get(signature) ?? newRequestKey();
     void sendChat({ kind: "text", text, sectionId, trackCode: track, key, signature });
@@ -698,6 +699,7 @@ export default function App() {
       if (attempt.kind === "voice") {
         form.append("audio", attempt.audio, "recording");
         if (termId) form.append("term_id", termId);
+        if (attempt.trackCode) form.append("track_code", attempt.trackCode);
       }
       const result = await api<ChatResponse>(attempt.kind === "voice" ? "/chat/voice" : "/chat", {
         method: "POST",
@@ -723,7 +725,7 @@ export default function App() {
         {
           role: "assistant",
           answer: e instanceof ApiError && e.status === 413 && attempt.kind === "voice"
-            ? (e.code === "VOICE_TOO_LONG" ? e.message : "每段錄音最多 5 MiB，請重新錄音。") : message(e),
+            ? (e.code === "VOICE_TOO_LONG" ? e.message : "每段音訊最多 5 MiB，請縮短後重試。") : message(e),
           mode: retry ? "unavailable" : "error",
           sources: details?.sources,
           registration: details?.registration,
@@ -1033,9 +1035,9 @@ export default function App() {
                       </select>
                     </label>
                     <label>
-                      <span className="sr-only">教師姓名</span>
+                      <span className="sr-only">教師名稱</span>
                       <input
-                        placeholder="教師姓名"
+                        placeholder="教師名稱"
                         value={filters.instructor}
                         onChange={(e) =>
                           setFilters({ ...filters, instructor: e.target.value })
@@ -1324,7 +1326,7 @@ export default function App() {
               <div className="panel-title">
                 <div>
                   <h2>✧ 選課助理</h2>
-                  <p>查課、規劃研究路徑或試排。加退選期間可用明確指令直接加選單門課。</p>
+                  <p>查課、規劃研究路徑或試排。初選可確認登記，加退選期間可用明確指令加選單門課。</p>
                 </div>
               </div>
               <div className="messages" ref={transcript} aria-label="助理對話">
@@ -1391,7 +1393,18 @@ export default function App() {
                             </button>
                             <p>{choice.school_name} {choice.department_name} · {choice.is_selectable ? `剩餘 ${choice.remaining} 席` : "未開放"}</p>
                             <Meetings items={choice.meetings} />
-                            {m.prompt && reg?.phase === "ADD_DROP" && (
+                            {m.registration?.phase === "INITIAL" && reg?.phase === "INITIAL" && (
+                              <button type="button" className="small"
+                                disabled={busy || chatBusy || !choice.is_selectable || personalLoading || !!personalError}
+                                onClick={() => {
+                                  const { section_id, code, title, credits, instructor_name, meetings } = choice;
+                                  setConfirmation({
+                                    section: { id: section_id, code, title, credits, instructor_name, meetings },
+                                    action: "apply",
+                                  });
+                                }}>登記此班</button>
+                            )}
+                            {m.prompt && m.registration?.phase === "ADD_DROP" && reg?.phase === "ADD_DROP" && (
                               <button type="button" className="small" disabled={chatBusy || !choice.is_selectable || choice.remaining <= 0}
                                 onClick={() => ask(m.prompt, choice.section_id)}>加選此班</button>
                             )}
@@ -1429,6 +1442,12 @@ export default function App() {
                       <div className="chat-actions">
                         {window.speechSynthesis && typeof SpeechSynthesisUtterance !== "undefined" &&
                           <button type="button" className="small" onClick={() => speak(m)}>朗讀回覆</button>}
+                        {m.transcript && (
+                          <button type="button" className="small" disabled={chatBusy} onClick={() => {
+                            setChatInput(m.transcript ?? "");
+                            document.getElementById("question")?.focus();
+                          }}>編輯辨識文字</button>
+                        )}
                         {m.retry && <button type="button" className="small" disabled={chatBusy}
                           onClick={() => m.retry && void sendChat(m.retry)}>重送同一請求</button>}
                       </div>
@@ -1468,7 +1487,7 @@ export default function App() {
               </form>
               {view === "chat" && student && (
                 <ChatVoice key={`${user?.id}-${termId}`} disabled={chatBusy}
-                  onSend={(audio) => void sendChat({ kind: "voice", audio, key: newRequestKey() })} />
+                  onSend={(audio) => void sendChat({ kind: "voice", audio, trackCode: lastTrackCode, key: newRequestKey() })} />
               )}
               <p className="chat-note">
                 {chatInput.length}/1000 字 ·
@@ -1722,7 +1741,7 @@ export default function App() {
 
 type CatalogOptions = {
   courses: { id: string; code: string; title: string }[];
-  instructors: { id: string; name: string }[];
+  instructors: { id: string; name: string; department_id: string }[];
   departments: { id: string; name: string }[];
 };
 const localInput = (s: string) =>
@@ -2307,9 +2326,9 @@ function SectionEditor({
                     setForm({ ...form, instructor_id: e.target.value })
                   }
                 >
-                  {options.instructors.map((i) => (
+                  {options.instructors.map((i, index) => (
                     <option value={i.id} key={i.id}>
-                      {i.name}
+                      {i.name} · {options.departments.find((d) => d.id === i.department_id)?.name} · {index + 1}
                     </option>
                   ))}
                 </select>

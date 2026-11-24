@@ -44,9 +44,12 @@ def test_at01_auth_roles_sessions_origin(client):
 
 
 def test_at02_catalog_filters_multimeeting_and_counts(client):
-    r = client.get(f'/api/v1/terms/{MAIN}/sections', params={'q': '程式', 'instructor': '陳', 'weekday': 3}).json()
+    teacher = '國立臺灣科技大學 - 示範教師'
+    r = client.get(f'/api/v1/terms/{MAIN}/sections', params={'q': '程式', 'instructor': teacher, 'weekday': 3}).json()
     assert r['total'] == 1 and len(r['items'][0]['meetings']) == 2
     s = r['items'][0]
+    assert s['instructor_name'] == teacher
+    assert client.get(f'/api/v1/terms/{MAIN}/sections/{s["id"]}').json()['instructor_name'] == teacher
     assert s['remaining'] == s['capacity'] - s['enrolled_count']
     assert client.get(f'/api/v1/terms/{INITIAL}/sections/{s["id"]}').status_code == 404
     assert client.get(f'/api/v1/terms/{MAIN}/sections?page_size=51').status_code == 422

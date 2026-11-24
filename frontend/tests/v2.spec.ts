@@ -119,8 +119,75 @@ test.describe("瀏覽器麥克風", () => {
     await openUniversity(page);
     await login(page, "student10");
     await page.getByRole("button", { name: "開始錄音" }).click();
-    await expect(page.getByText("麥克風未獲授權。請開放權限或改用文字輸入。")).toBeVisible();
+    await expect(page.getByText("麥克風未獲授權。請允許麥克風權限或選擇音檔。")).toBeVisible();
     await ask(page, "我剛剛選了什麼？");
     await expect(page.locator(".message.assistant")).toContainText("正式選課");
+  });
+
+  test("非安全來源仍可選擇音檔，送出前可取消", async ({ page }) => {
+    await page.addInitScript(() => Object.defineProperty(window, "isSecureContext", { value: false }));
+    let uploads = 0;
+    await page.route("**/api/v1/chat/voice", async (route) => {
+      uploads++;
+      expect(route.request().headers()["idempotency-key"]).toBeTruthy();
+      expect(route.request().postData()).toContain("Content-Type: audio/wav");
+      await route.fulfill({ json: {
+        mode: "student_query", answer: "查詢完成", transcript: "我星期三有課嗎？",
+        transcript_status: "CLEAR", sources: [], as_of: new Date().toISOString(), request_id: "fixture",
+      } });
+    });
+    await openUniversity(page);
+    await login(page, "student09");
+    await expect(page.getByRole("button", { name: "開始錄音" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "選擇音檔" })).toBeVisible();
+    const audioFile = page.getByLabel("音檔", { exact: true });
+    const fixture = { name: "note.WAV", mimeType: "audio/x-wav", buffer: Buffer.from("sample") };
+    await audioFile.setInputFiles(fixture);
+    await page.getByRole("button", { name: "取消音檔" }).click();
+    expect(uploads).toBe(0);
+    await audioFile.setInputFiles(fixture);
+    await page.getByRole("button", { name: "送出音檔" }).click();
+    await expect(page.getByText("語音辨識 我星期三有課嗎？")).toBeVisible();
+    expect(uploads).toBe(1);
+  });
+
+  test("錄音轉寫後可確認初選登記並在課表查看", async ({ page }) => {
+    await page.goto("/courses");
+    const termSelect = page.getByLabel("選擇學期");
+    await termSelect.selectOption({ label: "115-2 初選登記示範" });
+    const termId = await termSelect.inputValue();
+    await login(page, "student09");
+    const transcript = "我想要加選，CS101 A班。";
+    await page.route("**/api/v1/chat/voice", async (route) => {
+      const headers = route.request().headers();
+      delete headers["content-length"];
+      headers["content-type"] = "application/json";
+      const response = await route.fetch({
+        url: new URL("/api/v1/chat", route.request().url()).href,
+        headers,
+        postData: { term_id: termId, message: transcript },
+      });
+      expect(response.status()).toBe(200);
+      await route.fulfill({ response, json: { ...(await response.json()), transcript, transcript_status: "CLEAR" } });
+    });
+    await page.getByLabel("音檔", { exact: true }).setInputFiles({
+      name: "question.wav", mimeType: "audio/wav", buffer: Buffer.from("fixture"),
+    });
+    await page.getByRole("button", { name: "送出音檔" }).click();
+    await expect(page.getByText("語音辨識 " + transcript)).toBeVisible();
+    await page.getByRole("button", { name: "編輯辨識文字" }).click();
+    await expect(page.getByLabel("輸入選課問題")).toHaveValue(transcript);
+    const candidates = page.getByRole("list", { name: "待選班別" });
+    await expect(candidates.getByRole("listitem")).toHaveCount(1);
+    const applicationsPath = `/api/v1/me/terms/${termId}/applications`;
+    const before = await page.request.get(applicationsPath);
+    expect((await before.json()).items).toEqual([]);
+    await candidates.getByRole("button", { name: "登記此班" }).click();
+    const dialog = page.getByRole("dialog", { name: "確認登記初選" });
+    await expect(dialog).toContainText("CS101 程式設計");
+    await dialog.getByRole("button", { name: "確認提交" }).click();
+    await expect(page.getByRole("alert")).toContainText("初選登記成功");
+    await page.getByRole("button", { name: "我的課表", exact: true }).click();
+    await expect(page.locator(".class-block.pending").first()).toContainText("程式設計");
   });
 });

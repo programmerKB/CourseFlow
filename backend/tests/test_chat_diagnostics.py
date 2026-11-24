@@ -72,6 +72,28 @@ def test_provider_failure_has_safe_diagnostic(client, monkeypatch, caplog, statu
     assert client.get(f'/api/v1/terms/{MAIN}/sections').status_code == 200
 
 
+@pytest.mark.parametrize(('message', 'api_key'), [
+    ('找星期二還有空位的電子系課', 'test-key-no-network'),
+    ('請幫我查詢這學期週二仍有名額的臺科大電子工程系的課程。', ''),
+])
+def test_weekday_seat_search_queries_catalog_without_gemini(client, monkeypatch, message, api_key):
+    signin(client)
+    monkeypatch.setattr(settings, 'chat_stub', False)
+    monkeypatch.setattr(settings, 'gemini_api_key', api_key)
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail('A weekday seat search must use the public catalog directly')
+
+    monkeypatch.setattr(chat, 'generate_content', unexpected)
+
+    response = client.post('/api/v1/chat', json={'message': message, 'term_id': INITIAL})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data['mode'] == 'sql_query'
+    assert {item['title'].split()[0] for item in data['sources']} == {'EE101', 'EE301'}
+    assert {item['term_id'] for item in data['sources']} == {INITIAL}
+
+
 def test_temporary_gemini_failure_retries_the_same_course_query(client, monkeypatch, caplog):
     signin(client)
     monkeypatch.setattr(settings, 'chat_stub', False)
@@ -86,13 +108,16 @@ def test_temporary_gemini_failure_retries_the_same_course_query(client, monkeypa
             }})
         return httpx.Response(200, json={'candidates': [{
             'finishReason': 'STOP', 'content': {'role': 'model', 'parts': [{'text': json.dumps({
-                'mode': 'sql_query', 'tool': 'courses', 'weekday': 2, 'has_seats': True, 'department': '電子',
+                'mode': 'sql_query', 'tool': 'courses', 'weekday': 2, 'has_seats': True,
+                'department': '電子', 'sort': 'remaining',
             })}]},
         }]})
 
     mock_gemini_http(monkeypatch, respond)
     with caplog.at_level(logging.INFO):
-        response = client.post('/api/v1/chat', json={'message': '找星期二還有空位的電子系課', 'term_id': INITIAL})
+        response = client.post('/api/v1/chat', json={
+            'message': '找星期二還有空位的電子系課，依剩餘名額排序', 'term_id': INITIAL,
+        })
     assert response.status_code == 200, response.text
     assert len(requests) == 2 and requests[0].content == requests[1].content
     assert requests[0].url == requests[1].url

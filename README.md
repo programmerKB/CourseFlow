@@ -1,87 +1,132 @@
 # CourseFlow 大學選課與課程推薦系統
 
-`v2.0.0` 對應 [需求說明書 3.2](Course_Registration_SRS.md)，加入三校電資課庫、文字與語音直接加選，以及 16 條研究修課路徑。
+**版本 2.1.0**。CourseFlow 提供公開查課、初選登記、分發、週課表與教務管理。學生可用文字或語音查課，依 16 種研究方向試排並確認選課。115-1 課庫涵蓋臺大、臺師大與臺科大電資參考課程。
 
-CourseFlow 提供公開查課、初選登記、分發、週課表與教務管理。學生可用自然語言查詢課程或依研究方向試排，檢查班別後一次確認。基本課程、研究推薦範例與三校課庫都在 **115-1**，首次採預設設定部署時開啟初選。
+介面使用繁體中文，時間以臺北時間顯示。示範班別的時間、容量、學分及教師均為虛構資料。系統使用 React、FastAPI、PostgreSQL、LangGraph、Gemini 與 Docker Compose。 [需求說明書 3.2](Course_Registration_SRS.md)
 
-介面使用繁體中文，日期與時間採 `Asia/Taipei`，儲存庫內的種子資料為虛構資料。系統使用 React、TypeScript、FastAPI、PostgreSQL、LangGraph、Gemini 與 Docker Compose。
+[快速部署](#docker-compose-啟動) · [部署設定](#部署設定) · [區網與語音](#區網登入與語音) · [選課與課表](#115-1-選課與課表) · [驗證與開發](#自動測試)
 
 ![115-1 待分發課表與寄送課表按鈕](docs/timetable.png)
 
 ## Docker Compose 啟動
 
-需要 Bash、Docker Engine、Docker Compose plugin 及使用 Docker daemon 的權限。下列命令適用於需要 `sudo` 的 VM。已具備 Docker 權限時可省略 `sudo`。
+### 安裝 Docker
+
+在 Linux 主機或 VM 安裝 Docker Engine 與 Docker Compose plugin。
+
+- [Docker Engine 官方下載與安裝](https://docs.docker.com/engine/install/)
+- [Docker Engine 的 Ubuntu 安裝步驟](https://docs.docker.com/engine/install/ubuntu/) · [手動下載 Ubuntu 套件](https://docs.docker.com/engine/install/ubuntu/#install-from-a-package)
+- [Linux Compose plugin 安裝方式](https://docs.docker.com/compose/install/linux/)
+
+需要 Git、Bash 和 Docker daemon 使用權限。以下範例以需要 `sudo` 的 VM 為例。
+
+```bash
+sudo docker version
+sudo docker compose version
+```
 
 ### 首次部署
 
 ```bash
-git clone --branch v2.0.0 https://github.com/programmerKB/CourseFlow.git
+git clone --branch v2.1.0 https://github.com/programmerKB/CourseFlow.git
 cd CourseFlow
 sudo ./deploy.sh
 ```
 
-[deploy.sh](deploy.sh) 會從範本建立缺少的 `.env`，再建置映像檔、執行 migration、初始化示範資料並啟動前端與通知 Worker。健康檢查通過後會列出服務網址。
+[deploy.sh](deploy.sh) 會從範本建立缺少的 `.env`、建置映像檔、套用資料庫 migration、初始化示範資料，再啟動 API、前端及通知 Worker。健康檢查通過後會列出入口。預設公開 **115-1**，初選開放至初始化後第 7 天。
+
+| 服務 | 預設入口 |
+|---|---|
+| 選課系統 | [localhost:8080](http://localhost:8080) |
+| 選課助理 | [localhost:8080/chat](http://localhost:8080/chat) |
+| API 文件 | [localhost:8000/docs](http://localhost:8000/docs) |
+| Mailpit 收信畫面 | [localhost:8025](http://localhost:8025) |
+| API 健康檢查 | [存活](http://localhost:8000/health/live) · [資料庫就緒](http://localhost:8000/health/ready) |
 
 ### 更新既有部署
 
-在既有專案目錄執行以下指令，使用原本的 `.env` 和資料庫 volume。
+在既有專案目錄取得版本標籤，再使用原有的 `.env` 和資料庫 volume。
 
 ```bash
+git fetch origin --tags
+git switch --detach v2.1.0
 sudo ./deploy.sh
 ```
 
-```bash
-sudo ./deploy.sh --scenario awaiting   # 首次初始化為待分發情境
-sudo ./deploy.sh --no-build            # 使用既有映像檔
-sudo ./deploy.sh --env-file .env.production --timeout 300
-sudo ./deploy.sh --help
-```
+更新時會暫停應用服務，套用 migration 後重新啟動。種子程式會補齊三校班別，將舊展示學期的班別補入 115-1，並保留原有班別、登記、選課、分發及先修紀錄。已完成初始化、只需套用程式或環境設定時，可用 `--skip-seed`。
 
-升級會把舊展示學期的班別補入 115-1，包含時段、名額與先修條件。已在 115-1 開設的同課同班以原資料為準。舊展示學期會歸檔，原學期的登記、選課與先修紀錄留在資料庫。部署腳本會補齊尚未初始化的三校課程。
-
-首次沿用預設設定部署時，115-1 的初選開放至初始化後第 7 天。種子程式可將舊版沒有實際分發的示範紀錄轉為初選。
-
-腳本保留既有 `.env` 與資料庫 volume。更新時會暫停前端、API 與 Worker，migration 成功後再啟動，因此有短暫服務中斷。migration 失敗時停止後續部署並顯示失敗階段。環境檔按 Docker Compose 格式讀取。
-
-首次部署如需設定網域、連接埠或 Gemini 金鑰，可先 `cp .env.example .env` 並編輯，再執行腳本。`--env-file` 的相對路徑以執行指令時的目錄為準。腳本需要已安裝且可使用的 Docker，不會安裝 Docker 或自動使用 sudo。若已啟動本機開發服務，請先釋出 Compose 需要的 8000、8025 連接埠；腳本不會終止其他程序。
-
-若部署出現 `address already in use`，代表主機連接埠已被其他服務占用。可以先停止同專案的本機開發版（在執行 `scripts/run-local.sh` 的終端按 Ctrl+C；另行啟動的 Mailpit 需個別停止），或在 `.env` 調整主機連接埠後重跑部署：
-
-```dotenv
-FRONTEND_PORT=8080
-APP_ORIGIN=http://localhost:8080
-API_PORT=8001
-MAILPIT_PORT=8026
-```
-
-以上設定改用 API 文件 `http://localhost:8001/docs` 與 Mailpit `http://localhost:8026`；容器內 API、SMTP 連接埠不變。重試可用 `./deploy.sh --no-build`，使用剛才已完成的映像檔。以 sudo 首次建立的環境檔會保留 `0600`，並交還原使用者擁有；既有環境檔的權限不會自動更改。
-
-部署腳本的獨立流程測試可用 `python3 -m unittest discover -s scripts/tests -v` 執行。這些測試以模擬 Docker CLI 驗證流程順序、環境檔保留、故障中止及參數處理，不會修改正在執行的容器。
-
-### 服務入口
-
-| 入口 | 網址 |
+| 參數 | 用途 |
 |---|---|
-| 選課系統 | http://localhost:8080 |
-| FastAPI / OpenAPI 文件 | http://localhost:8000/docs |
-| Mailpit 收信畫面 | http://localhost:8025 |
-| 存活 / 資料庫就緒 | http://localhost:8000/health/live / http://localhost:8000/health/ready |
+| `--skip-seed` | 套用程式、migration 與環境設定 |
+| `--https` | 啟用區網 HTTPS，先驗證憑證與代理設定 |
+| `--no-build` | 沿用已建置的映像檔 |
+| `--scenario initial\|awaiting\|add-drop\|short` | 首次初始化的選課情境 |
+| `--env-file 路徑` | 指定環境檔，相對路徑以執行指令的目錄為準 |
+| `--timeout 秒數` | 每個服務與 HTTP 檢查的等待上限，預設 180 秒 |
 
-啟動順序為 `db healthy → migrate 成功 → api / worker → frontend`。`migrate` 是正常結束的一次性服務。`db` 使用獨立 `course_db` volume，`docker compose down` 與後續啟動會保留資料。既有 volume 的密碼由初始化時決定，修改 `.env` 不會自動修改 PostgreSQL 角色密碼。
+## 部署設定
 
-`.env.example` 的密碼為本機展示值。Compose 會把 `MIGRATOR_DB_PASSWORD`、`APP_DB_PASSWORD` 和 `PUBLIC_DB_PASSWORD` 的原始值分別傳給 PostgreSQL 與連線程式。即使包含 `@`、`/` 或 `%`，這三項也直接填原始密碼。若自行撰寫完整 `DATABASE_URL`，URL 裡的密碼仍依 SQLAlchemy 格式編碼。
+首次部署可先從 [.env.example](.env.example) 建立 `.env`；已部署的主機可直接編輯原環境檔。變更後執行 `sudo ./deploy.sh --skip-seed`。
 
-### 從區網登入
-
-把瀏覽器使用的完整來源網址填到 `APP_ORIGIN` 或 `APP_ALLOWED_ORIGINS`。如果選課與課表信件都會從區網開啟，可以在 `.env` 使用以下設定，將範例 IP 換成 VM 的區網 IP。
+### 調整 115-1 初選日期
 
 ```dotenv
-APP_ORIGIN=http://192.168.1.20:8080
-APP_ALLOWED_ORIGINS=http://localhost:8080
-COOKIE_SECURE=false
+INITIAL_START_AT=2026-11-24T09:00:00+08:00
+INITIAL_END_AT=2026-11-30T23:59:00+08:00
 ```
 
-`APP_ORIGIN` 也是 Email 連結的來源網址，額外允許的來源以逗號分隔。若畫面顯示「請由同源網站送出請求」，請核對網址的協定、IP 或網域及連接埠。HTTPS 部署請設定 `COOKIE_SECURE=true`。變更後執行 `sudo ./deploy.sh --skip-seed`。
+兩項要同時設定，並附上時區。部署時會先檢查再更新資料庫，保留原來的登記並留下稽核紀錄。兩項留空會採用資料庫時段。公布分發結果後，該次初選時段即鎖定。
+
+### 連接埠與資料庫
+
+| 變數 | 預設值 | 用途 |
+|---|---:|---|
+| `FRONTEND_PORT` | 8080 | 選課網站 HTTP |
+| `HTTPS_PORT` | 8443 | 啟用 HTTPS 時的網站入口 |
+| `API_PORT` | 8000 | 主機內的 API 與文件 |
+| `MAILPIT_PORT` | 8025 | 主機內的 Mailpit 收信畫面 |
+
+主機連接埠已被占用時，可調整相應的變數。若變更使用者實際開啟的網址，也請更新 `APP_ORIGIN`，讓 Email 連結指向正確入口。
+
+PostgreSQL 使用 `course_db` volume，`docker compose down` 後資料仍會保留。初始化時由 `MIGRATOR_DB_PASSWORD`、`APP_DB_PASSWORD` 與 `PUBLIC_DB_PASSWORD` 建立資料庫角色。這三項填原始密碼即可。既有資料庫角色的密碼需在 PostgreSQL 更新。若自行設定完整的 `DATABASE_URL`，需對 URL 中的密碼進行編碼。
+
+## 區網登入與語音
+
+### 使用區網登入
+
+在 VM 上可開 `http://localhost:8080`。同區網的裝置用 `http://<VM 的區網 IP>:8080`。頁面與 API 由同一個網址提供時，可直接登入。若使用自訂網域，以 `APP_ORIGIN` 或逗號分隔的 `APP_ALLOWED_ORIGINS` 設定完整的來源網址。
+
+### 在區網啟用麥克風
+
+瀏覽器將 `localhost` 視為受信任的本機來源。區網 IP 需要受信任的 HTTPS 才能使用網頁麥克風。 [瀏覽器安全情境規範](https://www.w3.org/TR/secure-contexts/#is-origin-trustworthy)
+
+1. 在開瀏覽器的電腦以 mkcert 產生憑證，將範例 IP 換成 VM 的實際區網位址。 [mkcert 安裝說明](https://github.com/FiloSottile/mkcert#installation)
+
+   ```bash
+   mkcert -install
+   mkcert -cert-file server.crt -key-file server.key localhost 127.0.0.1 192.168.1.20
+   ```
+
+2. 在 VM 將伺服器憑證和私鑰放到 `.tls/server.crt`、`.tls/server.key`，私鑰權限設成 `600`。其他裝置須信任簽發憑證的 CA。 [跨裝置安裝 CA](https://github.com/FiloSottile/mkcert#installing-the-ca-on-other-systems)
+3. 已部署的專案可啟動 `compose.yaml` 的 HTTPS 服務。若同時要更新程式或 `.env`，改用 `sudo ./deploy.sh --skip-seed --https`。
+
+   ```bash
+   sudo docker compose --profile https up -d --no-deps https
+   ```
+
+4. 從本機開啟 `https://localhost:8443/chat`，從區網開啟 `https://192.168.1.20:8443/chat`。登入後按「開始錄音」並授權麥克風。
+
+可在 `.env` 設定 `COMPOSE_PROFILES=https` 讓後續部署啟用同一個 HTTPS 服務。若要以 HTTPS 作為主要入口，`APP_ORIGIN` 填對應的完整網址，並設 `COOKIE_SECURE=true`，讓登入 Cookie 只經 HTTPS 傳送。
+
+### 語音輸入與朗讀
+
+按「開始錄音」後說出問題，再按「停止並送出」。20 秒到期會停止收音並等待送出或取消。
+
+從區網 HTTP 也可以按「選擇音檔」，使用裝置的錄音程式錄下問題後上傳。支援 WebM、M4A、MP4、Ogg、WAV 和 MP3，每段最多 20 秒、5 MiB。選檔後可確認送出或取消。助理會顯示轉寫文字，支援朗讀的瀏覽器可按「朗讀回覆」。
+
+初選期間可說「我要登記初選電路學」或「我要加選電路學」，再點辨識結果中的「登記此班」並確認。若先以語音查詢研究方向，可接著說「請試排這個方向的本期課程」，再確認試排中的班別。辨識有誤時，可點「編輯辨識文字」修正後送出。
+
+送出的錄音由後端轉成單聲道 WAV 並傳給 `GEMINI_AUDIO_MODEL` 轉寫。Compose 映像已安裝 FFmpeg。本機啟動須另安裝 FFmpeg 並讓 `ffmpeg` 可從 PATH 執行。文字直接加選、已知研究路徑與本人選課查詢可在 Gemini 暫時無法使用時繼續操作。語音與文字模型分別依設定啟用。[Gemini 音訊輸入](https://ai.google.dev/gemini-api/docs/audio) · [預設模型支援格式](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite)
 
 ## 115-1 選課與課表
 
@@ -134,7 +179,7 @@ sudo ./deploy.sh --scenario short
 2. 學生在初選學期登記，到「我的選課」與「我的課表」查看待分發班別。取消登記後，該班別會從兩處移除。
 3. 在 `awaiting` 或 `short` 主學期，管理員進入「教務管理」執行「分發並公布」，查看錄取與未錄取數；重送返回同一批次。
 4. 加退選學期以 student19 退選 CS304，再以 student01 加選，檢查名額、總學分與正式課表。
-5. 設定 Gemini 後詢問「找這學期星期二還有空位的電子系課」，點開來源核對班別。
+5. 在選課助理詢問「找這學期星期二還有空位的電子系課」，點開來源核對班別。這個問法直接查詢公開課程資料。
 6. 展示研究推薦、試排與確認流程。在「我的課表」點「寄送課表」，再開啟 Mailpit 查看郵件。管理頁可查詢寄送狀態。
 
 ### 研究方向推薦與批次選課
@@ -146,79 +191,26 @@ sudo ./deploy.sh --scenario short
 
 測試時可使用 `CHAT_STUB=true`，讓固定意圖走同一條推薦與選課流程。實際 Gemini 驗收需設定金鑰與 `CHAT_STUB=false`。
 
-### V2 三校課庫與單門加選
+### 三校課庫與單門加選
 
 執行 `sudo ./deploy.sh` 後，可直接在 **115-1** 查詢 40 門三校參考課程及 41 個三校模擬班別。校別篩選可分別查看臺大、臺師大與臺科大。
 
 1. 在課程查詢選擇「國立臺灣科技大學」、「電子工程系」與「計算機結構與記憶體系統」。班別詳情附「校方課程來源」。上課時段、名額、學分及教師是專題資料。
 2. 在即時加退選期間，以學生帳號開啟選課助理，輸入「我要加選臺科大電子系的高等計算機結構」或「我要加選 NTUST-ET-001」。找到唯一班別且資格符合時，當次送出就會更新「我的課表」。
-3. 省略校系時會列出同名課的候選班別，可點「加選此班」。初選階段可由錯誤訊息開啟班別進行初選登記。
+3. 省略校系時會列出同名課的候選班別。初選期間可點「登記此班」並確認，課表會顯示待分發。加退選期間可點「加選此班」。
 4. 輸入「我想做 RF，這學期先修什麼？」查看基礎、進階和研究專題。可接著按「試排本期課程」，再確認要提交的班別。「IC 設計」和「NVM」會先請你選方向。
-
-### 語音輸入與朗讀
-
-使用 HTTPS 或本機的 `http://localhost:8080`。Chrome 等支援錄音的瀏覽器會請求麥克風權限。點「開始錄音」，說出問題或明確加選指令，再按「停止並送出」。20 秒到期時停止收音，畫面會等待送出或取消。助理會顯示轉寫文字，支援朗讀的瀏覽器可按「朗讀回覆」。
-
-區網語音可在前端服務前使用 HTTPS 反向代理，將 `APP_ORIGIN` 設為實際的 HTTPS 來源，並設定 `COOKIE_SECURE=true`。區網 HTTP 可使用文字助理。
-
-送出的錄音由後端轉成單聲道 WAV 並傳給 `GEMINI_AUDIO_MODEL` 轉寫。Compose 映像已安裝 FFmpeg。本機啟動須另安裝 FFmpeg 並讓 `ffmpeg` 可從 PATH 執行。文字直接加選、已知研究路徑與本人選課查詢可在 Gemini 暫時無法使用時繼續操作。語音與文字模型分別依設定啟用。[Gemini 音訊輸入](https://ai.google.dev/gemini-api/docs/audio) · [預設模型支援格式](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite)
-
-## Email 設定與 SMTP 錯誤排查
-
-課表信列出正式選課、待分發班別、上課時間、教室和學分。管理員可在「教務管理 → Email 通知狀態」查閱 Worker 處理結果。
-
-Worker 的 SMTP 主機、連接埠、加密方式及帳密必須使用同一個服務的設定。預設 Mailpit 測試模式為：
-
-```dotenv
-SMTP_HOST=mailpit
-SMTP_PORT=1025
-SMTP_STARTTLS=false
-SMTP_USER=
-SMTP_PASSWORD=
-SMTP_FROM=courses@example.test
-```
-
-透過 Gmail SMTP 寄到真實信箱時，請在專案 `.env` 設定以下項目，替換寄件地址及應用程式密碼。
-
-```dotenv
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_STARTTLS=true
-SMTP_USER=yourname@gmail.com
-SMTP_PASSWORD=Google產生的16碼應用程式密碼
-SMTP_FROM=yourname@gmail.com
-```
-
-Google 帳戶需先開啟兩步驟驗證，再到[應用程式密碼](https://myaccount.google.com/apppasswords)建立 CourseFlow 專用密碼。依 [Google SMTP 文件](https://developers.google.com/workspace/gmail/imap/imap-smtp)，此設定使用 587 與 STARTTLS。學生的 `users.email` 也必須改為真實收件地址，種子資料預設為 `example.test`。
-
-修改後重新建立 Worker；使用 `--build` 時也會載入本目錄最新的錯誤診斷程式：
-
-```bash
-sudo docker compose up -d --build --no-deps --force-recreate worker
-sudo docker compose exec worker python -c 'import os; print({k: os.getenv(k) for k in ("SMTP_HOST", "SMTP_PORT", "SMTP_STARTTLS")})'
-```
-
-Gmail 應顯示 `smtp.gmail.com`、`587`、`true`。這個檢查不會輸出帳號、密碼；不要以完整環境或完整 Compose 設定作為公開的除錯輸出。
-
-| 日誌錯誤碼 | 原因與處理 |
-|---|---|
-| `SMTP_AUTH_UNSUPPORTED` | 目前伺服器未提供帳密驗證。若顯示 `mailpit:1025` 卻填入 Gmail 帳密，請將主機、埠及 TLS 一起改成 Gmail；使用 Mailpit 則清空帳密。 |
-| `SMTP_STARTTLS_UNSUPPORTED` | 所連伺服器沒有 STARTTLS。請核對主機與埠；程式不會降級為明文登入。 |
-| `SMTPAuthenticationError` | SMTP 認證未通過，請確認寄件帳號與該帳號產生的應用程式密碼。 |
-
-舊版 Worker 的 `SMTPNotSupportedError` 可能是前兩項原因；新版日誌會顯示明確錯誤碼及固定提示，不輸出憑證。Mailpit 預設不使用加密或驗證，詳見 [Mailpit SMTP 文件](https://mailpit.axllent.org/docs/configuration/smtp/)。
-
-設定修正後，可在「我的課表」點「寄送課表」，並在「教務管理 → Email 通知狀態」查看寄送結果。未達三次的待寄通知依原排程重試。已達三次的 `FAILED` 通知會保留既有結果。
 
 ## Gemini 設定與驗收
 
-選課助理使用 Gemini API，需另外取得 Gemini 金鑰。先開啟 [Google AI Studio 的 API Keys 頁面](https://aistudio.google.com/apikey)，登入 Google 帳號，建立或選擇專案後按「建立 API 金鑰」，將金鑰複製至本機的專案環境檔。建立及管理方式參考 [Google 官方說明](https://aistudio.google.com/docs/api-key)。
+### 設定模型與金鑰
+
+在 Google AI Studio 選擇專案、建立 API 金鑰，再填入 VM 的 `.env`。 [建立 Gemini API 金鑰](https://aistudio.google.com/apikey) · [金鑰設定文件](https://aistudio.google.com/docs/api-key)
 
 ```bash
 sudo nano .env
 ```
 
-修改既有項目（不要重複新增同名項目），儲存後離開；金鑰不要貼到聊天、程式碼或日誌：
+在環境檔修改這四項設定，將金鑰保存在 VM 本機。
 
 ```ini
 GEMINI_MODEL=gemini-3.5-flash-lite
@@ -229,11 +221,11 @@ CHAT_STUB=false
 
 目前預設 `gemini-3.5-flash-lite`，可改為專案可用且支援結構化輸出的模型。選課助理透過 `langchain-google-genai` 連接 Gemini Developer API，用 Pydantic 驗證結構化計畫，再從 PostgreSQL 取得課程與資格。最小連線測試額外提供直接 REST 診斷。[模型說明](https://aistudio.google.com/docs/models/gemini-3.5-flash-lite) · [LangChain Gemini 整合](https://docs.langchain.com/oss/python/integrations/chat/google_generative_ai)
 
-重建 API 容器以載入新的程式與環境變數；接著重啟前端代理，讓它重新解析 API 容器位址：
+重建 API 容器以載入新的程式與環境變數。等 API 就緒後重啟前端代理，讓它重新解析 API 容器位址。
 
 ```bash
-sudo docker compose up -d --build --no-deps --force-recreate api
-sudo docker compose restart frontend
+sudo docker compose up --build --no-deps --force-recreate --wait api &&
+  sudo docker compose restart frontend
 ```
 
 確認容器是否已載入設定（只顯示是否存在金鑰，不顯示內容），再以學生帳號登入測試，例如 `student01`：
@@ -243,6 +235,8 @@ sudo docker compose exec api python -c 'import os; print({"GEMINI_MODEL": os.get
 ```
 
 預期看到 `GEMINI_API_KEY_SET: True`、`CHAT_STUB: 'false'` 及指定的模型名稱。這只確認設定載入，實際呼叫仍取決於金鑰權限、模型可用性、網路與專案額度。
+
+### 驗證與診斷
 
 以下指令用真實 Gemini 測試 115-1 查課與研究推薦，並比對 PostgreSQL 中的公開班別。
 
@@ -274,7 +268,7 @@ sudo docker compose exec -T api python < scripts/diagnose-gemini.py
 sudo docker compose cp api:/tmp/gemini-verification.json docs/gemini-verification.json
 ```
 
-未設定金鑰時，助理回 `503 CHAT_UNAVAILABLE` 並提供課程、課表入口；其他功能正常。`CHAT_STUB=true` 僅供測試：以固定意圖替代 Gemini，仍走同一個 LangGraph 與真實資料庫工具。測試 stub 不算真實 Gemini 驗收。
+選課、課表、寄信與明確指定星期、系所和空位的查課可直接使用資料庫。需由 Gemini 處理的問題會在服務無法使用時提供課程查詢及課表入口。`CHAT_STUB=true` 供測試使用，以固定意圖執行同一套 LangGraph 與資料庫工具。
 
 若仍失敗，畫面會顯示對應提示。API 日誌會記錄 `reason_code`，收到 Gemini HTTP 錯誤時也會記錄 `provider_http_status`。Gemini 回傳 500、502 或 503 時，助理會在原有逾時上限內等候片刻並重試一次。[Gemini 重試指南](https://aistudio.google.com/docs/troubleshooting#retry-strategy)
 
@@ -292,15 +286,67 @@ sudo docker compose cp api:/tmp/gemini-verification.json docs/gemini-verificatio
 
 完整驗收結果以 `python -m app.verify_gemini` 產生的[真實 Gemini 紀錄](docs/gemini-verification.json)為準。
 
-## 自動測試
+## Email 設定與 SMTP 錯誤排查
 
-API、交易與併發測試使用真實 PostgreSQL，絕不以 SQLite 替代。測試只接受名稱以 `_test` 結尾的資料庫，並清空該測試資料庫的應用資料。
+課表信列出正式選課、待分發班別、上課時間、教室和學分。管理員可在「教務管理 → Email 通知狀態」查閱 Worker 處理結果。
 
-Compose 已啟動後，使用 migration 角色建立獨立 `courses_test` 並執行：
+### Mailpit 測試收信
+
+預設將通知送到 Mailpit。用瀏覽器開啟收信畫面，即可檢查寄送內容。 [Mailpit 收信畫面](http://localhost:8025)
+
+```dotenv
+SMTP_HOST=mailpit
+SMTP_PORT=1025
+SMTP_STARTTLS=false
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_FROM=courses@example.test
+```
+
+### Gmail 寄送
+
+透過 Gmail SMTP 寄信時，在專案 `.env` 設定寄件地址與應用程式密碼。
+
+```dotenv
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_STARTTLS=true
+SMTP_USER=yourname@gmail.com
+SMTP_PASSWORD=Google產生的16碼應用程式密碼
+SMTP_FROM=yourname@gmail.com
+```
+
+Google 帳戶需先開啟兩步驟驗證，再到[應用程式密碼](https://myaccount.google.com/apppasswords)建立 CourseFlow 專用密碼。依 [Google SMTP 文件](https://developers.google.com/workspace/gmail/imap/imap-smtp)，此設定使用 587 與 STARTTLS。學生的 `users.email` 也必須改為真實收件地址，種子資料預設為 `example.test`。
+
+修改後重新建立 Worker；使用 `--build` 時也會載入本目錄最新的錯誤診斷程式：
 
 ```bash
-make test
-# 等同：docker compose run --rm migrate python run_tests.py
+sudo docker compose up -d --build --no-deps --force-recreate worker
+sudo docker compose exec worker python -c 'import os; print({k: os.getenv(k) for k in ("SMTP_HOST", "SMTP_PORT", "SMTP_STARTTLS")})'
+```
+
+Gmail 應顯示 `smtp.gmail.com`、`587`、`true`。這個檢查不會輸出帳號、密碼；不要以完整環境或完整 Compose 設定作為公開的除錯輸出。
+
+| 日誌錯誤碼 | 原因與處理 |
+|---|---|
+| `SMTP_AUTH_UNSUPPORTED` | 目前伺服器未提供帳密驗證。若顯示 `mailpit:1025` 卻填入 Gmail 帳密，請將主機、埠及 TLS 一起改成 Gmail；使用 Mailpit 則清空帳密。 |
+| `SMTP_STARTTLS_UNSUPPORTED` | 所連伺服器沒有 STARTTLS。請核對主機與埠；程式不會降級為明文登入。 |
+| `SMTPAuthenticationError` | SMTP 認證未通過，請確認寄件帳號與該帳號產生的應用程式密碼。 |
+
+舊版 Worker 的 `SMTPNotSupportedError` 可能是前兩項原因；新版日誌會顯示明確錯誤碼及固定提示，不輸出憑證。Mailpit 預設不使用加密或驗證，詳見 [Mailpit SMTP 文件](https://mailpit.axllent.org/docs/configuration/smtp/)。
+
+設定修正後，可在「我的課表」點「寄送課表」，並在「教務管理 → Email 通知狀態」查看寄送結果。未達三次的待寄通知依原排程重試。已達三次的 `FAILED` 通知會保留既有結果。
+
+## 自動測試
+
+### 後端與部署
+
+後端測試使用獨立的 PostgreSQL 資料庫，名稱須以 `_test` 結尾。執行時會清空該測試資料庫的應用資料，並用虛構資料建立案例。
+
+Compose 已啟動後，以下指令會使用 migration 角色建立並測試 `courses_test`。
+
+```bash
+sudo docker compose run --rm migrate python run_tests.py
 ```
 
 本機 PostgreSQL 開發環境：
@@ -311,6 +357,10 @@ PUBLIC_DATABASE_URL=postgresql+psycopg://course_public:course_public@127.0.0.1:5
 .venv/bin/python backend/run_tests.py
 ```
 
+部署腳本可用 `python3 -m unittest discover -s scripts/tests -v` 驗證。測試會使用模擬 Docker CLI。
+
+### 瀏覽器
+
 跨學期的瀏覽器回歸會進行加退選、初選登記、課表寄送和容量維護。請使用獨立測試資料庫，以 `seed('add-drop', recommendation_demo=True, university_demo=True, include_demo_terms=True)` 建立測試情境，設定 `PUBLIC_INITIAL_TERM_ID=`、`CHAT_STUB=true` 並將 SMTP 指向 Mailpit，再啟動前後端。
 
 ```bash
@@ -320,7 +370,7 @@ npx playwright install chromium
 E2E_BASE_URL=http://localhost:5173 npm run test:e2e
 ```
 
-如測試 Compose 前端，改為 `E2E_BASE_URL=http://localhost:8080`。前端建置為 `npm run build`（含 TypeScript 型別檢查）。實測結果與限制請參閱 [V2 驗證報告](docs/verification-v2.md)。
+測試 Compose 前端時，將 `E2E_BASE_URL` 改為測試服務的網址。截圖存於 `frontend/test-results/`。前端執行 `npm run build` 時會檢查 TypeScript 型別。
 
 ## 本機開發（Linux、不依賴 Docker daemon）
 
@@ -347,7 +397,7 @@ E2E_BASE_URL=http://localhost:5173 npm run test:e2e
 |---|---|
 | `GET /api/v1/schools`、`GET /api/v1/topics` | 提供公開查課的校系與主題選項。班別列表接受 `school_code` 和 `topic_code`。 |
 | `POST /api/v1/chat` | 傳送 `message` 與 `term_id`。直接加選帶 `Idempotency-Key`。從候選選班時附原指令與 `section_id`。已選定研究方向後可用 `track_code` 接續試排。 |
-| `POST /api/v1/chat/voice` | 以 `multipart/form-data` 傳送 `audio`、`term_id` 並附 `Idempotency-Key`。回傳轉寫及與文字助理相同的結果。 |
+| `POST /api/v1/chat/voice` | 以 `multipart/form-data` 傳送 `audio`、`term_id` 並附 `Idempotency-Key`。可用 `track_code` 接續研究方向試排。回傳轉寫及與文字助理相同的結果。 |
 | `POST /api/v1/me/terms/{term_id}/selection-plans/{plan_id}/confirm` | 只接受本人草案中的 1–5 班。`section_ids` 是確定送出的班別集合。任一班失敗時整批回滾，回應以 `details.section_id` 指出班別。 |
 | `POST /api/v1/me/terms/{term_id}/timetable/email` | 將當下課表排入本人信箱的寄送佇列。`201` 回傳 `notification_id`。 |
 
@@ -365,9 +415,9 @@ backend/app/seed.py         固定 ID 的可重複種子資料
 backend/alembic/            migration、固定初版 DDL 與公開 View
 backend/tests/             PostgreSQL 整合、併發、SMTP 與效能測試
 scripts/                   初始化及本機開發腳本
-compose.yaml               db / migrate / api / frontend / worker / mailpit
+compose.yaml               PostgreSQL、migration、API、前端、通知及 HTTPS
 ```
 
 [架構、核心 ERD 與交易設計](docs/architecture.md)、[SQL 與 EXPLAIN ANALYZE BUFFERS](docs/explain.txt)、[效能數據](docs/performance.json)、[課程查詢畫面](docs/desktop.png)、[手機畫面](docs/mobile.png)。
 
-本版的需求對照、測試結果及部署驗收項目見 [V2 驗證報告](docs/verification-v2.md)。[v1.0.0 驗證紀錄](docs/verification.md) 保留原交付結果。
+歷史驗收紀錄可參閱 [v2.0.0 驗證報告](docs/verification-v2.md) 與 [v1.0.0 驗證紀錄](docs/verification.md)。
