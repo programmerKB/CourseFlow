@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .runtime/
+.tls/
 *.log
 *.dump
 *.dump.gz

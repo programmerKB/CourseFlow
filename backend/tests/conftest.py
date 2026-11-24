@@ -14,6 +14,8 @@ if not url or not url.rsplit('/', 1)[-1].endswith('_test'):
 os.environ['DATABASE_URL'] = url
 os.environ['PUBLIC_DATABASE_URL'] = os.environ.get('TEST_PUBLIC_DATABASE_URL', url.replace('course_migrator', 'course_public'))
 os.environ['CHAT_STUB'] = 'true'
+# Compose passes the live term scope, date overrides and cookie settings to its test job.
+os.environ.update(PUBLIC_INITIAL_TERM_ID='', INITIAL_START_AT='', INITIAL_END_AT='', COOKIE_SECURE='false')
 
 from app.db import engine, SessionLocal
 from app.main import app

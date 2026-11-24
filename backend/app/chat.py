@@ -20,7 +20,7 @@ from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select, text
 from starlette.concurrency import run_in_threadpool
-from .catalog_data import school_code
+from .catalog_data import DEPARTMENTS, department_names, normalize_name, school_code, school_prefix
 from .chat_enrollment import existing_response, fingerprint, handle_command, parse_command
 from .chat_sources import source
 from .config import settings
@@ -92,6 +92,13 @@ def unavailable(term_id, reason_code='CHAT_FAILED'):
                         'sources': [source(term_id), source(title='我的課表', url='/timetable')]})
 
 
+def resolve_term_id(term_id):
+    public_term_id = settings.public_initial_term_id
+    if public_term_id and term_id and term_id != public_term_id:
+        raise DomainError(404, 'TERM_NOT_FOUND', '找不到公開學期。')
+    return term_id or public_term_id or None
+
+
 def failure_reason(error):
     # Follow wrapped errors without logging their contents.
     for _ in range(8):
@@ -146,11 +153,28 @@ ELIGIBILITY_QUESTION = re.compile(
     r'(?:請問\s*)?(?:我(?:現在)?(?:能|可(?:以)?)加選\s*(?P<target>.{1,100}?)'
     r'|(?P<before>.{1,100}?)\s*(?:可(?:以)?|能)加選)(?:嗎[?。]?|\?)'
 )
+WEEKDAY_COURSE_SEARCH = re.compile(
+    r'(?:請\s*)?(?:幫我\s*)?(?:找|查詢|查|列出)\s*(?:這學期\s*)?'
+    r'(?P<weekday>(?:星期|[週周])[一二三四五六日天])\s*'
+    r'(?:還|仍|尚)?有\s*(?:空位|名額)\s*的\s*'
+    r'(?P<department>.{1,100}?)\s*(?:的\s*)?課(?:程)?[\s。?!？！]*'
+)
+DEPARTMENT_NAMES = frozenset(
+    alias
+    for group, (code, title, _) in DEPARTMENTS.items()
+    for alias in department_names(code, title, group.split('-', 1)[0])
+)
 
 
 def local_plan(message):
     # Match only complete, explicit questions so extra constraints reach the model.
     message = recommendation.normalize_keyword(message)
+    match = WEEKDAY_COURSE_SEARCH.fullmatch(message)
+    if match:
+        department, school = school_prefix(normalize_name(match['department']))
+        if department in DEPARTMENT_NAMES:
+            return Plan(mode='sql_query', tool='courses', department=department, school_code=school,
+                        weekday=mentioned_weekday(match['weekday']), has_seats=True)
     if MY_SELECTIONS.fullmatch(message):
         return Plan(mode='student_query', tool='my_selections')
     match = DEPARTMENT_ADVICE.fullmatch(message)
@@ -537,6 +561,7 @@ async def handle_chat(db, user, message, term_id, request_id, *, request_key=Non
     message = message.strip()
     if not message:
         raise DomainError(422, 'EMPTY_MESSAGE', '請輸入選課問題。')
+    term_id = resolve_term_id(term_id)
     if digest is None and request_key:
         digest = fingerprint(term_id, channel, message.encode('utf-8'), selected_section)
         replay = await run_in_threadpool(existing_response, user, term_id, request_key, digest)
@@ -549,10 +574,6 @@ async def handle_chat(db, user, message, term_id, request_id, *, request_key=Non
         return await run_in_threadpool(handle_command, user, command, term_id, request_key, digest, request_id,
                                        channel, selected_section, deadline)
 
-    if settings.public_initial_term_id:
-        if term_id and term_id != settings.public_initial_term_id:
-            raise DomainError(404, 'TERM_NOT_FOUND', '找不到公開學期。')
-        term_id = settings.public_initial_term_id
     plan = local_plan(message)
     tracks = []
     if plan is None and not re.search(r'^(?:請)?(?:查詢|查|列出)|剩餘名額|能加選|可加選', message):

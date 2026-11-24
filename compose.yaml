@@ -10,6 +10,8 @@ x-backend: &backend
     APP_ALLOWED_ORIGINS: ${APP_ALLOWED_ORIGINS:-}
     COOKIE_SECURE: ${COOKIE_SECURE:-false}
     PUBLIC_INITIAL_TERM_ID: ${PUBLIC_INITIAL_TERM_ID-8abc15dd-c1b8-53ed-a570-ae723e17a762}
+    INITIAL_START_AT: ${INITIAL_START_AT:-}
+    INITIAL_END_AT: ${INITIAL_END_AT:-}
     GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
     GEMINI_AUDIO_MODEL: ${GEMINI_AUDIO_MODEL:-gemini-3.5-flash-lite}
     GEMINI_API_KEY: ${GEMINI_API_KEY:-}
@@ -67,6 +69,33 @@ services:
     depends_on:
       api:
         condition: service_healthy
+  https:
+    image: nginx:1.28.0-alpine
+    profiles: ["https"]
+    ports:
+      - "${HTTPS_PORT:-8443}:443"
+    depends_on:
+      frontend:
+        condition: service_started
+    volumes:
+      - type: bind
+        source: ./frontend/nginx.https.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.tls/server.crt
+        target: /etc/nginx/tls/server.crt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.tls/server.key
+        target: /etc/nginx/tls/server.key
+        read_only: true
+        bind:
+          create_host_path: false
   worker:
     <<: *backend
     command: ["python", "-m", "app.worker"]

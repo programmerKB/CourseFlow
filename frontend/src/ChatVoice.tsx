@@ -3,6 +3,15 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 const MAX_SECONDS = 20;
 const MAX_BYTES = 5 * 1024 * 1024;
 const FORMATS = ["audio/webm;codecs=opus", "audio/mp4;codecs=mp4a.40.2", "audio/mp4", "audio/ogg;codecs=opus"];
+const FILE_TYPES: Record<string, string> = {
+  webm: "audio/webm",
+  m4a: "audio/mp4",
+  mp4: "audio/mp4",
+  ogg: "audio/ogg",
+  oga: "audio/ogg",
+  wav: "audio/wav",
+  mp3: "audio/mpeg",
+};
 
 type Recording = {
   recorder: MediaRecorder;
@@ -12,6 +21,8 @@ type Recording = {
   timer: number;
   send: boolean;
 };
+
+type AudioClip = { audio: Blob; fileName?: string };
 
 function release(stream: MediaStream) {
   stream.getTracks().forEach((track) => track.stop());
@@ -27,10 +38,11 @@ export default function ChatVoice({
   const [pending, setPending] = useState(false);
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [clip, setClip] = useState<Blob | null>(null);
+  const [clip, setClip] = useState<AudioClip | null>(null);
   const [error, setError] = useState("");
   const active = useRef<Recording | null>(null);
   const permissionRequest = useRef(0);
+  const fileInput = useRef<HTMLInputElement>(null);
   const supported = window.isSecureContext && typeof navigator.mediaDevices?.getUserMedia === "function"
     && typeof window.MediaRecorder === "function";
 
@@ -63,13 +75,32 @@ export default function ChatVoice({
     return () => window.clearInterval(clock);
   }, [recording]);
 
-  function submit(blob: Blob) {
+  function validateSize(blob: Blob) {
     if (!blob.size || blob.size > MAX_BYTES) {
-      setError(blob.size ? "每段錄音最多 5 MiB，請縮短錄音後重試。" : "錄音沒有聲音，請重新錄音。");
+      setError(blob.size ? "每段音訊最多 5 MiB，請縮短後重試。" : "音訊檔案是空的，請重新錄音或選擇其他檔案。");
+      return false;
+    }
+    return true;
+  }
+
+  function submit(blob: Blob) {
+    if (!validateSize(blob)) return;
+    setClip(null);
+    setError("");
+    onSend(blob);
+  }
+
+  function selectAudio(file?: File) {
+    if (!file) return;
+    setError("");
+    if (!validateSize(file)) return;
+    const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+    const mediaType = FILE_TYPES[extension];
+    if (!file.name.includes(".") || !Object.hasOwn(FILE_TYPES, extension)) {
+      setError("請選擇 WebM、M4A、MP4、Ogg、WAV 或 MP3 音檔。");
       return;
     }
-    setClip(null);
-    onSend(blob);
+    setClip({ audio: file.slice(0, file.size, mediaType), fileName: file.name });
   }
 
   async function start() {
@@ -77,7 +108,7 @@ export default function ChatVoice({
     if (!supported) return;
     const mimeType = FORMATS.find((format) => MediaRecorder.isTypeSupported(format));
     if (!mimeType) {
-      setError("此瀏覽器沒有支援的錄音格式。請改用文字輸入。");
+      setError("此瀏覽器沒有支援的錄音格式。請選擇音檔或使用文字輸入。");
       return;
     }
     let stream: MediaStream | undefined;
@@ -111,7 +142,7 @@ export default function ChatVoice({
         setRecording(false);
         const blob = new Blob(capture.chunks, { type: recorder.mimeType || mimeType });
         if (capture.send) submit(blob);
-        else setClip(blob);
+        else setClip({ audio: blob });
       };
       recorder.start();
       // Stop slightly before 20 s to allow the final encoded audio frame.
@@ -123,7 +154,9 @@ export default function ChatVoice({
       if (permissionRequest.current !== request) return;
       active.current = null;
       const denied = failure instanceof DOMException && failure.name === "NotAllowedError";
-      setError(denied ? "麥克風未獲授權。請開放權限或改用文字輸入。" : "無法開啟麥克風，請改用文字輸入。");
+      setError(denied
+        ? "麥克風未獲授權。請允許麥克風權限或選擇音檔。"
+        : "無法開啟麥克風。請選擇音檔或使用文字輸入。");
     } finally {
       if (permissionRequest.current === request) setPending(false);
     }
@@ -139,30 +172,46 @@ export default function ChatVoice({
 
   return (
     <div className="voice-controls">
-      {supported ? (
+      <input
+        ref={fileInput}
+        type="file"
+        aria-label="音檔"
+        accept={Object.keys(FILE_TYPES).map((extension) => `.${extension}`).join(",")}
+        hidden
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          event.currentTarget.value = "";
+          selectAudio(file);
+        }}
+      />
+      {!recording && !clip && (
         <>
-          {!recording && !clip && (
+          {supported && (
             <button type="button" disabled={disabled || pending} onClick={start}>
               {pending ? "等待麥克風權限…" : "開始錄音"}
             </button>
           )}
-          {(recording || clip || pending) && (
-            <>
-              {recording && <span aria-label={`錄音中，${elapsed} 秒`}><span className="recording-dot" aria-hidden="true" /> {elapsed} 秒</span>}
-              {clip && <span role="status">錄音已停止，可送出或取消。</span>}
-              {(recording || clip) && (
-                <button type="button" disabled={disabled} onClick={() => clip ? submit(clip) : stop(true)}>
-                  {clip ? "送出錄音" : "停止並送出"}
-                </button>
-              )}
-              <button type="button" onClick={cancel}>取消錄音</button>
-            </>
+          <button type="button" disabled={disabled || pending} onClick={() => fileInput.current?.click()}>
+            選擇音檔
+          </button>
+          {!supported && (
+            <small>{window.isSecureContext ? "可選擇裝置上的錄音檔。" : "可先用裝置錄音，再選擇音檔。使用 HTTPS 可在網頁直接錄音。"}</small>
           )}
-          <small>送出的錄音會傳給 Gemini 轉寫，每段最多 20 秒。</small>
         </>
-      ) : (
-        <small>麥克風需要 HTTPS 或 localhost 與支援錄音的瀏覽器，可使用文字輸入。</small>
       )}
+      {(recording || clip || pending) && (
+        <>
+          {recording && <span aria-label={`錄音中，${elapsed} 秒`}><span className="recording-dot" aria-hidden="true" /> {elapsed} 秒</span>}
+          {clip && <span className="voice-file" role="status">{clip.fileName ?? "錄音已停止"}</span>}
+          {(recording || clip) && (
+            <button type="button" disabled={disabled} onClick={() => clip ? submit(clip.audio) : stop(true)}>
+              {clip?.fileName ? "送出音檔" : clip ? "送出錄音" : "停止並送出"}
+            </button>
+          )}
+          <button type="button" onClick={cancel}>{clip?.fileName ? "取消音檔" : "取消錄音"}</button>
+        </>
+      )}
+      <small>每段最多 20 秒、5 MiB。送出後由 Gemini 轉寫。</small>
       {error && <p className="error" role="alert">{error}</p>}
     </div>
   );

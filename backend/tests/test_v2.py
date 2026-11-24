@@ -20,7 +20,7 @@ from app import registration, voice
 from app.config import settings
 from app.db import SessionLocal
 from app.main import app
-from app.models import AuditEvent, Enrollment, NotificationOutbox, SectionMeeting, SelectionPlan, StudentTerm, Term
+from app.models import Application, AuditEvent, Enrollment, NotificationOutbox, SectionMeeting, SelectionPlan, StudentTerm, Term
 from app.roadmap_data import TRACKS
 from app.seed import seed_university_catalog, uid
 from conftest import FIXED, signin
@@ -46,8 +46,11 @@ def ask(client, message, *, term=TERM, key='chat-test', **kwargs):
                        headers={'Idempotency-Key': key} if key else {})
 
 
-def voice_request(client, audio, *, key='voice-test', media_type='audio/webm'):
-    return client.post('/api/v1/chat/voice', data={'term_id': TERM},
+def voice_request(client, audio, *, key='voice-test', media_type='audio/webm', term=TERM, track_code=None):
+    fields = {'term_id': term}
+    if track_code is not None:
+        fields['track_code'] = track_code
+    return client.post('/api/v1/chat/voice', data=fields,
                        files={'audio': ('fixture', audio, media_type)}, headers={'Idempotency-Key': key})
 
 
@@ -66,6 +69,7 @@ def test_at20_three_university_catalog_filters_and_sources(client):
             for code in schools} == {'NTU': 15, 'NTNU': 11, 'NTUST': 14}
     assert all(r['catalog_origin'] == 'UNIVERSITY_REFERENCE' and r['source_url'].startswith('https://')
                and r['topics'] and r['meetings'] for r in items)
+    assert all(r['instructor_name'] == f'{schools[r["school_code"]]["name"]} - 示範教師' for r in items)
     electronics = next(d['id'] for d in schools['NTUST']['departments'] if d['name'] == '電子工程系')
     uri = f'/api/v1/terms/{TERM}/sections'
     response = client.get(uri, params={'school_code': 'NTUST', 'department_id': electronics,
@@ -161,27 +165,31 @@ def test_at23_direct_enrollment_reuses_business_rules(client, code, expected):
     assert transaction_counts() == before
 
 
-def test_at23_initial_and_closed_errors_show_registration(client, monkeypatch):
+def test_at23_initial_offers_registration_and_closed_shows_schedule(client, monkeypatch):
     signin(client)
     response = ask(client, '我要加選 CS301', term=INIT)
-    assert response.status_code == 409 and response.json()['code'] == 'REGISTRATION_CLOSED'
-    details = response.json()['details']
-    assert details['registration']['phase'] == 'INITIAL'
-    assert '/courses?' in details['sources'][0]['url']
+    assert response.status_code == 200
+    preview = response.json()
+    assert preview['mode'] == 'clarify' and preview['registration']['phase'] == 'INITIAL'
+    assert [entry['section_id'] for entry in preview['choices']] == [uid('section/initial/CS301/A')]
+    assert not client.get(f'/api/v1/me/terms/{INIT}/applications').json()['items']
+    assert ask(client, '我要登記初選 NTUST-ET-001').json()['code'] == 'REGISTRATION_CLOSED'
     monkeypatch.setattr(registration, 'now', lambda db: FIXED + timedelta(days=31))
     response = ask(client, '請加選 NTUST-ET-001')
     assert response.json()['details']['registration']['phase'] == 'CLOSED'
     assert not transaction_counts()[0]
 
 
-def encode_audio(seconds=0.6, frequency=440, codec='libopus', container='webm', silent=False):
+def encode_audio(seconds=0.6, frequency=440, codec='libopus', container='webm', silent=False, output=None):
     if not which('ffmpeg'):
         pytest.skip('FFmpeg is required for the audio integration tests')
     source = 'anullsrc=r=48000:cl=mono' if silent else f'sine=frequency={frequency}:sample_rate=48000'
     flags = ['-movflags', 'empty_moov+frag_keyframe'] if container == 'mp4' else []
-    return subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', source, '-t', str(seconds),
-                           '-c:a', codec, *flags, '-f', container, 'pipe:1'],
-                          check=True, capture_output=True, timeout=10).stdout
+    destination = str(output) if output is not None else 'pipe:1'
+    result = subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', source, '-t', str(seconds),
+                             '-c:a', codec, *flags, '-f', container, destination],
+                            check=True, capture_output=True, timeout=10)
+    return output.read_bytes() if output is not None else result.stdout
 
 
 @pytest.fixture
@@ -204,8 +212,10 @@ def test_voice_decodes_mp4_with_sample_index_after_audio(tmp_path):
 
 @pytest.mark.parametrize(('codec', 'container', 'media_type'), [
     ('libopus', 'webm', 'audio/webm'), ('aac', 'mp4', 'audio/mp4'), ('libopus', 'ogg', 'audio/ogg'),
+    ('pcm_s16le', 'wav', 'audio/wav'), ('libmp3lame', 'mp3', 'audio/mpeg'),
 ])
-def test_at24_voice_direct_addition_with_decoded_browser_formats(client, monkeypatch, codec, container, media_type):
+def test_at24_voice_direct_addition_with_recording_and_upload_formats(client, monkeypatch, tmp_path,
+                                                                    codec, container, media_type):
     calls = []
 
     async def transcribe(wav):
@@ -216,19 +226,57 @@ def test_at24_voice_direct_addition_with_decoded_browser_formats(client, monkeyp
 
     monkeypatch.setattr(voice, 'transcribe', transcribe)
     signin(client)
-    audio = encode_audio(codec=codec, container=container)
+    output = tmp_path / 'voice.wav' if container == 'wav' else None
+    audio = encode_audio(codec=codec, container=container, output=output)
     response = voice_request(client, audio, media_type=media_type)
     assert response.status_code == 200, response.text
     data = response.json()
     assert data['mode'] == 'add_course' and data['action']['section_id'] == section('NTUST-ET-001')
     assert '高等計算機結構' in data['transcript'] and data['transcript_status'] == 'CLEAR'
     assert voice_request(client, audio, media_type=media_type).json() == data and len(calls) == 1
-    changed_audio = encode_audio(frequency=500, codec=codec, container=container)
+    output = tmp_path / 'changed.wav' if container == 'wav' else None
+    changed_audio = encode_audio(frequency=500, codec=codec, container=container, output=output)
     assert voice_request(client, changed_audio, media_type=media_type).json()['code'] == 'IDEMPOTENCY_KEY_REUSED'
     with SessionLocal() as db:
         audit = db.scalar(select(AuditEvent).where(AuditEvent.term_id == TERM))
         assert audit.payload['channel'] == 'CHAT_VOICE'
         assert set(audit.payload) == {'section_id', 'source', 'channel'}
+
+
+def test_voice_initial_choice_flows_to_pending_registration(client, monkeypatch, audio):
+    async def transcribe(_wav):
+        return voice.Transcript(status='CLEAR', transcript='我想要加選，CS101 A班。')
+
+    monkeypatch.setattr(voice, 'transcribe', transcribe)
+    signin(client)
+    result = voice_request(client, audio, term=INIT)
+    assert result.status_code == 200, result.text
+    preview = result.json()
+    choice = uid('section/initial/CS101/A')
+    assert preview['transcript'] == '我想要加選，CS101 A班。'
+    assert preview['registration']['phase'] == 'INITIAL'
+    assert [section['section_id'] for section in preview['choices']] == [choice]
+    base = f'/api/v1/me/terms/{INIT}'
+    assert client.get(f'{base}/applications').json()['items'] == []
+    result = client.put(f'{base}/applications/{choice}')
+    assert result.status_code == 200 and result.json()['status'] == 'PENDING'
+    timetable = client.get(f'{base}/timetable').json()
+    assert [row['id'] for row in timetable['pending_items']] == [choice]
+    assert timetable['items'] == []
+
+
+def test_voice_trial_plan_keeps_the_selected_research_track(client, monkeypatch, audio):
+    async def transcribe(_wav):
+        return voice.Transcript(status='CLEAR', transcript='請試排這個方向的本期課程。')
+
+    monkeypatch.setattr(voice, 'transcribe', transcribe)
+    signin(client, 'student08')
+    roadmap = ask(client, '類比與混合訊號 IC').json()['recommendation']['roadmap']
+    response = voice_request(client, audio, track_code=roadmap['track_code'])
+    assert response.status_code == 200, response.text
+    recommendation = response.json()['recommendation']
+    assert recommendation['roadmap']['track_code'] == roadmap['track_code']
+    assert recommendation['plan'] is not None
 
 
 def test_at25_malformed_silent_oversized_and_unavailable_voice(client, monkeypatch, audio, caplog):
@@ -272,7 +320,7 @@ def test_audio_provider_receives_wav_and_incomplete_response_cannot_write(client
         assert payload['generationConfig']['responseMimeType'] == 'application/json'
         part = next(part['inlineData'] for content in payload['contents'] for part in content['parts'] if 'inlineData' in part)
         assert part['mimeType'] == 'audio/wav'
-        with wave.open(BytesIO(base64.b64decode(part['data']))) as wav:
+        with wave.open(BytesIO(base64.urlsafe_b64decode(part['data']))) as wav:
             assert wav.getframerate() == 16000 and wav.getnchannels() == 1
         return httpx.Response(200, request=request, json={'candidates': [{
             'finishReason': next(reasons), 'content': {'parts': [{'text': json.dumps({

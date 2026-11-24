@@ -188,6 +188,8 @@ export type CourseChoice = {
   school_name: string;
   department_name: string;
   section_no: string;
+  credits: Section["credits"];
+  instructor_name: string;
   meetings: Meeting[];
   remaining: number;
   is_selectable: boolean;

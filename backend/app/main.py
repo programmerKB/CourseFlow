@@ -3,7 +3,9 @@ import hashlib
 import logging
 import time
 from datetime import datetime
+from ipaddress import ip_address, ip_network
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, Depends, Response, Query, Header
@@ -16,7 +18,7 @@ from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
-from .config import settings
+from .config import normalize_origin, settings
 from .db import get_db
 from .errors import DomainError
 from .auth import current_user, student_user, admin_user, COOKIE_NAME, login
@@ -26,8 +28,30 @@ from .admin import UUIDStr, StrictModel
 
 log = logging.getLogger('courses')
 logging.basicConfig(level=logging.INFO, format='%(message)s')
-app = FastAPI(title='大學選課與課程推薦系統', version='2.0.0')
+app = FastAPI(title='大學選課與課程推薦系統', version='2.1.0')
 prefix = '/api/v1'
+LAN_NETWORKS = tuple(ip_network(cidr) for cidr in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
+
+
+def matches_local_origin(request, origin):
+    host = request.headers.get('host')
+    if not host:
+        return False
+    scheme = request.url.scheme
+    if origin.startswith('https://') and request.headers.get('sec-fetch-site') == 'same-origin':
+        # A browser can confirm the frontend's HTTPS origin when TLS ends at Nginx.
+        scheme = 'https'
+    try:
+        target_origin = normalize_origin(f'{scheme}://{host}')
+        if origin != target_origin:
+            return False
+        hostname = urlsplit(target_origin).hostname
+        if hostname == 'localhost':
+            return True
+        address = ip_address(hostname)
+    except ValueError:
+        return False
+    return address.is_loopback or any(address in network for network in LAN_NETWORKS)
 
 
 @app.middleware('http')
@@ -36,7 +60,8 @@ async def request_context(request, call_next):
     begin = time.monotonic()
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
         origin = request.headers.get('origin')
-        if (origin is not None and origin not in settings.browser_origins) or request.headers.get('sec-fetch-site') == 'cross-site':
+        if (request.headers.get('sec-fetch-site') == 'cross-site' or
+                origin is not None and origin not in settings.browser_origins and not matches_local_origin(request, origin)):
             return JSONResponse(status_code=403, content={'code': 'ORIGIN_FORBIDDEN', 'message': '請由同源網站送出請求。', 'request_id': request.state.request_id})
     response = await call_next(request)
     response.headers['X-Request-ID'] = request.state.request_id
@@ -268,7 +293,8 @@ def eligibility(term_id: UUIDStr, section_id: UUIDStr, user=Depends(student_user
 def catalog(user=Depends(admin_user), db=Depends(get_db)):
     return {'courses': [{'id': c.id, 'code': c.code, 'title': c.title, 'department_id': c.department_id} for c in db.scalars(select(Course).order_by(Course.code))],
             'departments': departments(db),
-            'instructors': [{'id': i.id, 'name': i.name, 'department_id': i.department_id} for i in db.scalars(select(Instructor).order_by(Instructor.name))]}
+            'instructors': [{'id': i.id, 'name': i.name, 'department_id': i.department_id}
+                            for i in db.scalars(select(Instructor).order_by(Instructor.name, Instructor.department_id, Instructor.id))]}
 
 
 @app.get(prefix + '/admin/terms')
@@ -399,18 +425,19 @@ async def chat(body: ChatInput, request: Request, request_key: OptionalRequestKe
 @app.post(prefix + '/chat/voice', openapi_extra=voice.FORM_SCHEMA,
           response_model=ChatOutput, response_model_exclude_unset=True)
 async def chat_voice(request: Request, request_key: RequestKey, user=Depends(student_user), db=Depends(get_db)):
-    from .chat import handle_chat
+    from .chat import handle_chat, resolve_term_id
     from .chat_enrollment import existing_response, fingerprint
 
     deadline = time.monotonic() + 30
     transcript = ''
     try:
         async with asyncio.timeout(30):
-            audio, media_type, term_id = await voice.receive_audio(request)
+            audio, media_type, term_id, track_code = await voice.receive_audio(request)
             try:
                 term_id = TypeAdapter(UUIDStr | None).validate_python(term_id)
             except ValidationError:
                 raise DomainError(422, 'VALIDATION_ERROR', '學期識別碼格式不正確。') from None
+            term_id = resolve_term_id(term_id)
             digest = fingerprint(term_id, 'CHAT_VOICE', audio)
             replay = await run_in_threadpool(existing_response, user, term_id, request_key, digest)
             if replay is not None:
@@ -418,7 +445,8 @@ async def chat_voice(request: Request, request_key: RequestKey, user=Depends(stu
             transcript = await voice.recognize(audio, media_type, request.state.request_id)
             del audio
             result = await handle_chat(db, user, transcript, term_id, request.state.request_id,
-                                       request_key=request_key, digest=digest, channel='CHAT_VOICE', deadline=deadline)
+                                       request_key=request_key, digest=digest, channel='CHAT_VOICE',
+                                       track_context=track_code, deadline=deadline)
             return {'transcript': transcript, 'transcript_status': 'CLEAR', **result}
     except TimeoutError:
         raise voice.unavailable() from None

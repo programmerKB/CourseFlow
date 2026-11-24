@@ -30,6 +30,7 @@ FORM_SCHEMA = {
         'type': 'object', 'required': ['audio'], 'properties': {
             'audio': {'type': 'string', 'format': 'binary'},
             'term_id': {'type': 'string', 'format': 'uuid'},
+            'track_code': {'type': 'string', 'maxLength': 64},
         },
     }}}},
 }
@@ -40,6 +41,8 @@ FORMATS = {
     'video/mp4': ('mov', b'ftyp', 4),
     'audio/ogg': ('ogg', b'OggS', 0),
     'application/ogg': ('ogg', b'OggS', 0),
+    'audio/wav': ('wav', b'RIFF', 0),
+    'audio/mpeg': ('mp3', b'ID3', 0),
 }
 log = logging.getLogger('courses.voice')
 
@@ -82,19 +85,21 @@ async def receive_audio(request):
         yield bytes(body)
 
     try:
-        form = await VoiceFormParser(request.headers, parts(), max_files=1, max_fields=1).parse()
+        form = await VoiceFormParser(request.headers, parts(), max_files=1, max_fields=2).parse()
     except (MultiPartException, MultipartParseError, ValueError):
         raise DomainError(422, 'INVALID_VOICE_FORM', '錄音表單無法讀取，請重錄。') from None
     try:
-        audio, term = form.get('audio'), form.get('term_id')
+        audio, term, track = form.get('audio'), form.get('term_id'), form.get('track_code')
         if not isinstance(audio, UploadFile) or term is not None and not isinstance(term, str):
             raise DomainError(422, 'INVALID_VOICE_FORM', '錄音表單至少需包含一段錄音。')
+        if track is not None and (not isinstance(track, str) or not 1 <= len(track) <= 64):
+            raise DomainError(422, 'VALIDATION_ERROR', '研究方向識別碼格式不正確。')
         content = await audio.read(MAX_AUDIO_BYTES + 1)
         if len(content) > MAX_AUDIO_BYTES:
             raise DomainError(413, 'VOICE_TOO_LARGE', '每段錄音最多 5 MiB。')
         if not content:
             raise unclear(status='SILENT')
-        return content, (audio.content_type or '').split(';', 1)[0].strip().lower(), term
+        return content, (audio.content_type or '').split(';', 1)[0].strip().lower(), term, track
     finally:
         await form.close()
 
@@ -102,9 +107,14 @@ async def receive_audio(request):
 async def decode_audio(content, media_type):
     entry = FORMATS.get(media_type)
     if entry is None:
-        raise DomainError(415, 'VOICE_UNSUPPORTED_FORMAT', '錄音須使用 WebM、MP4 或 Ogg 格式。')
+        raise DomainError(415, 'VOICE_UNSUPPORTED_FORMAT', '請使用 WebM、M4A、MP4、Ogg、WAV 或 MP3 音檔。')
     demuxer, signature, position = entry
-    if content[position:position + len(signature)] != signature:
+    matches = content[position:position + len(signature)] == signature
+    if demuxer == 'wav':
+        matches = matches and content[8:12] == b'WAVE'
+    elif demuxer == 'mp3':
+        matches = matches or (len(content) >= 2 and content[0] == 0xff and (content[1] & 0xe0) == 0xe0)
+    if not matches:
         raise DomainError(415, 'VOICE_UNSUPPORTED_FORMAT', '錄音內容與所選格式不符。')
     input_options = ['-protocol_whitelist', 'pipe']
     input_source = 'pipe:0'
