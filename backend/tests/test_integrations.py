@@ -72,14 +72,14 @@ def enqueue():
 def test_at12_outbox_retry_recovery(monkeypatch):
     nid=enqueue()
     def down(*args): raise ConnectionRefusedError()
-    monkeypatch.setattr(worker,'send_smtp',down)
+    monkeypatch.setattr(worker,'deliver',down)
     assert worker.process_one()
     with SessionLocal.begin() as db:
         n=db.get(NotificationOutbox,nid)
         assert n.status == 'PENDING' and n.attempt_count == 1 and n.last_error == 'ConnectionRefusedError'
         n.next_attempt_at=FIXED-timedelta(days=1)
     jobs=[]
-    monkeypatch.setattr(worker,'send_smtp',lambda job: jobs.append(job))
+    monkeypatch.setattr(worker,'deliver',lambda job: jobs.append(job))
     assert worker.process_one()
     with SessionLocal() as db:
         n=db.get(NotificationOutbox,nid)

@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 from uuid import uuid4
 
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import select, func, and_, or_, exists
+from sqlalchemy import select, func, or_, exists
 
 from .catalog_data import normalize_name
 from .config import settings

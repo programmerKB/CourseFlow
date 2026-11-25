@@ -259,18 +259,27 @@ if [[ "$https_enabled" == true ]]; then
 fi
 
 stage='檢查 Llama 模型服務'
-printf '\n檢查英文選課助理的 Llama 模型服務（LLAMA_BASE_URL）…\n'
+printf '\n檢查選課助理（中文查詢與英文加退選）的 Llama 模型服務（LLAMA_BASE_URL）…\n'
 # The model may run on another machine (for example Ollama on the Windows host), so a failure only warns.
 if ! "${compose[@]}" exec -T api python -m app.verify_llama --server-only; then
-  printf '注意：英文選課助理目前連不到 Llama 模型服務，網頁加退選不受影響。\n' >&2
-  printf '依上方提示修正 Windows 的 Ollama 或 .env 的 LLAMA_BASE_URL 後，執行 ./deploy.sh --skip-seed --no-build。\n' >&2
+  printf '注意：選課助理目前連不到 Llama 模型服務，網頁加退選不受影響。\n' >&2
+  printf '依上方提示修正 Windows 的 Ollama 或 .env 的 LLAMA_BASE_URL 後，執行 sudo ./deploy.sh --skip-seed --no-build。\n' >&2
+fi
+
+stage='檢查 Gmail 寄信'
+printf '\n檢查通知信的 Gmail 寄信設定…\n'
+# A missing or wrong credential only warns: registration keeps working and the outbox records the
+# failure, which retry-failed can resend later.
+if ! "${compose[@]}" exec -T api python -m app.manage verify-email; then
+  printf '注意：Gmail 目前無法寄信，通知信會記為失敗或只寄到 Mailpit 預覽信箱。\n' >&2
+  printf '依上方提示修正 .env 的 SMTP_*（應用程式密碼），執行 sudo ./deploy.sh --skip-seed --no-build，再執行 sudo docker compose exec api python -m app.manage retry-failed 重寄。\n' >&2
 fi
 
 stage='部署結果'
 frontend_url="$(local_url frontend 80)"
 api_url="$(local_url api 8000)"
 mailpit_url="$(local_url mailpit 8025)"
-printf '\n部署完成。\n選課系統：%s\nAPI 文件：%s/docs\nMailpit：%s\n' "$frontend_url" "$api_url" "$mailpit_url"
+printf '\n部署完成。\n選課系統：%s\nAPI 文件：%s/docs\nMailpit（未設定 Gmail 帳號時的預覽信箱）：%s\n' "$frontend_url" "$api_url" "$mailpit_url"
 if [[ "$https_enabled" == true ]]; then
   https_url="$(local_url https 443 https)"
   printf '選課系統 HTTPS：%s\n' "$https_url"

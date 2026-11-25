@@ -140,7 +140,7 @@ def test_at37_english_add_and_drop_with_two_phrasings_each(client, caplog):
         assert body['agent']['graph'] == 'english_registration'
         assert body['agent']['tools'] == ['stub.parse_intent', 'resolve_section', 'add_course']  # no LLM in stub mode
         assert body['agent']['llm']['stub'] is True
-        assert 'Gmail API' in body['answer']
+        assert 'Gmail' in body['answer']
         assert active_sections('student01') == {sec('CS101')}
         dropped = chat(client, drop_text)
         assert dropped.status_code == 200, dropped.text
@@ -545,6 +545,7 @@ def test_at41_gmail_api_retry_then_sent_with_message_id(client, monkeypatch):
 def test_gmail_configuration_and_authorization_errors_fail_without_retry(client, monkeypatch):
     signin(client)
     first = web_add(client, sec('CS101')).json()['notification_id']
+    monkeypatch.setattr(settings, 'gmail_transport', 'api')
     monkeypatch.setattr(settings, 'gmail_client_id', '')
     gmail.clear_token_cache()
     assert worker.process_one()
@@ -558,16 +559,65 @@ def test_gmail_configuration_and_authorization_errors_fail_without_retry(client,
     assert (row.status, row.attempt_count, row.last_error) == ('FAILED', 1, 'GMAIL_AUTH_FAILED')
 
 
-def test_dev_smtp_preview_is_labelled_and_keeps_other_notices_on_smtp(client, monkeypatch):
+def test_every_email_type_is_sent_with_the_gmail_api(client, monkeypatch):
+    """With GMAIL_TRANSPORT=api, confirmations and every other notice use users.messages.send."""
+    signin(client)
+    confirmation = web_add(client, sec('CS101')).json()['notification_id']
+    timetable = client.post(f'/api/v1/me/terms/{MAIN}/timetable/email', headers={'Idempotency-Key': str(uuid4())})
+    assert timetable.status_code == 201, timetable.text
+    gmail_settings(monkeypatch)
+    sent = []
+
+    def handler(request):
+        if request.url.host == 'oauth2.googleapis.com':
+            return httpx.Response(200, json={'access_token': 'test-access', 'expires_in': 3600, 'scope': gmail.SEND_SCOPE})
+        assert str(request.url) == gmail.SEND_URL
+        raw = json.loads(request.content)['raw']
+        message = email.message_from_bytes(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), policy=policy.default)
+        sent.append(message)
+        return httpx.Response(200, json={'id': f'gmail-{len(sent)}'})
+
+    use_transport(monkeypatch, handler)
+    worker.run_once()
+    assert [str(m['Subject']).endswith(suffix) for m, suffix in zip(sent, ('Course registration confirmed', '每週課表'))] == [True, True]
+    assert all(m['From'] == 'CourseFlow <courseflow.test@gmail.com>' for m in sent)
+    rows = [outbox(confirmation), outbox(timetable.json()['notification_id'])]
+    assert [(row.status, row.provider_message_id) for row in rows] == [('SENT', 'gmail-1'), ('SENT', 'gmail-2')]
+
+
+def test_failed_emails_can_be_requeued_after_gmail_is_configured(client, monkeypatch, capsys):
+    from app import manage
     signin(client)
     notification_id = web_add(client, sec('CS101')).json()['notification_id']
-    monkeypatch.setattr(settings, 'gmail_transport', 'dev-smtp')
-    delivered = []
-    monkeypatch.setattr(worker, 'deliver_smtp', lambda message, event_id: delivered.append(message))
+    monkeypatch.setattr(settings, 'gmail_transport', 'api')
+    monkeypatch.setattr(settings, 'gmail_client_id', '')
+    gmail.clear_token_cache()
+    assert worker.process_one()
+    assert (outbox(notification_id).status, outbox(notification_id).last_error) == ('FAILED', 'GMAIL_NOT_CONFIGURED')
+    manage.retry_failed('GMAIL_NOT_CONFIGURED')
+    assert json.loads(capsys.readouterr().out)['requeued'] == 1
+    gmail_settings(monkeypatch)
+    use_transport(monkeypatch, lambda request: httpx.Response(200, json=(
+        {'access_token': 'test-access', 'expires_in': 3600, 'scope': gmail.SEND_SCOPE}
+        if request.url.host == 'oauth2.googleapis.com' else {'id': 'gmail-after-fix'})))
     assert worker.process_one()
     row = outbox(notification_id)
-    assert row.status == 'SENT' and row.provider_message_id.startswith('dev-smtp:')
-    assert 'Course registration confirmed' in delivered[0]['Subject']
+    assert (row.status, row.attempt_count, row.provider_message_id, row.last_error) == ('SENT', 1, 'gmail-after-fix', None)
+
+
+def test_default_transport_is_gmail_smtp_for_every_notice(client, monkeypatch):
+    signin(client)
+    confirmation = web_add(client, sec('CS101')).json()['notification_id']
+    timetable = client.post(f'/api/v1/me/terms/{MAIN}/timetable/email', headers={'Idempotency-Key': str(uuid4())})
+    monkeypatch.setattr(settings, 'gmail_transport', 'smtp')
+    monkeypatch.setattr(settings, 'smtp_user', 'sender@gmail.com')
+    delivered = []
+    monkeypatch.setattr(worker, 'deliver_smtp', lambda message, event_id: delivered.append(message))
+    worker.run_once()
+    rows = [outbox(confirmation), outbox(timetable.json()['notification_id'])]
+    assert all(row.status == 'SENT' and row.provider_message_id.startswith('smtp:') for row in rows)
+    assert 'Course registration confirmed' in str(delivered[0]['Subject']) and '每週課表' in str(delivered[1]['Subject'])
+    assert all(message['From'] == 'sender@gmail.com' for message in delivered)
 
 
 # ---- AT-42 / AT-43: instructor roster and grades ----------------------------------------------

@@ -110,8 +110,13 @@ export default function Teaching({
       const message = e instanceof ApiError && e.status === 422 ? "成績須為 0–100，最多兩位小數。"
         : e instanceof ApiError && e.status === 404 ? "此學生已不在本班正式名單，請重新整理。"
           : e instanceof Error ? e.message : "成績未儲存，請重試。";
-      setErrors((current) => ({ ...current, [enrollmentId]: message }));
-      if (e instanceof ApiError && e.status === 404) setRevision((x) => x + 1);
+      if (e instanceof ApiError && e.status === 404) {
+        // Reloading clears row errors, so say why in a toast that outlives the refresh.
+        onToast(message);
+        setRevision((x) => x + 1);
+      } else {
+        setErrors((current) => ({ ...current, [enrollmentId]: message }));
+      }
     } finally {
       setSaving(null);
     }

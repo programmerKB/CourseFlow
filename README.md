@@ -1,18 +1,19 @@
 # CourseFlow 大學選課與課程推薦系統
 
-**版本 3.0.0**。CourseFlow 提供公開查課、初選登記、分發、週課表與教務管理。學生可在網頁或用英文對話加選、退選（LangGraph + Llama 3.2 3B），每學期最多 18 學分且不得衝堂，正式選課後以 Gmail API 寄出確認信。授課教師可查本班名單並登錄成績。學生也可用中文文字或語音查課，依 16 種研究方向試排並確認選課。所有語言模型與語音辨識都在本機執行：文字問答用 Llama 3.2 3B，語音用 faster-whisper，不使用雲端模型。115-1 課庫涵蓋臺大、臺師大與臺科大電資參考課程。
+**版本 3.0.1**。CourseFlow 提供公開查課、初選登記、分發、週課表與教務管理。學生可在網頁或用英文對話加選、退選（LangGraph + Llama 3.2 3B），每學期最多 18 學分且不得衝堂，正式選課後以 Gmail 寄出確認信（預設用應用程式密碼，可選 Gmail API）。授課教師可查本班名單並登錄成績。學生也可用中文文字或語音查課，依 16 種研究方向試排並確認選課。所有語言模型與語音辨識都在本機執行：文字問答用 Llama 3.2 3B，語音用 faster-whisper，不使用雲端模型。115-1 課庫涵蓋臺大、臺師大與臺科大電資參考課程。
 
-介面使用繁體中文，時間以臺北時間顯示。示範班別的時間、容量、學分及教師均為虛構資料。系統使用 React、FastAPI、PostgreSQL、LangGraph、Llama 3.2 3B、faster-whisper、Gmail API 與 Docker Compose。 [需求說明書 4.0](Course_Registration_SRS.md)
+介面使用繁體中文，時間以臺北時間顯示。示範班別的時間、容量、學分及教師均為虛構資料。系統使用 React、FastAPI、PostgreSQL、LangGraph、Llama 3.2 3B、faster-whisper、Gmail（SMTP 或 Gmail API）與 Docker Compose。 [需求說明書 4.0](Course_Registration_SRS.md)
 
 [快速部署](#docker-compose-啟動) · [教師規格](#教師規格srs-40) · [部署設定](#部署設定) · [區網與語音](#區網登入與語音) · [本機模型](#本機模型中文查詢與語音) · [選課與課表](#115-1-選課與課表) · [驗證與開發](#自動測試)
 
 ![115-1 待分發課表與寄送課表按鈕](docs/timetable.png)
 
-### v3.0.0 主要變更
+### v3.0.1 主要變更
 
-- **教師規格（SRS 4.0）**：英文自然語言加選、退選（LangGraph + Llama 3.2 3B）；網頁與助理共用衝堂與每學期 18 學分檢查；正式選課後以 Gmail API 寄確認信；`INSTRUCTOR` 角色可查本班名單並登錄、修改成績。資料庫升級為 migration `0006`。
+- **教師規格（SRS 4.0）**：英文自然語言加選、退選（LangGraph + Llama 3.2 3B）；網頁與助理共用衝堂與每學期 18 學分檢查；正式選課後以 Gmail 寄確認信（預設用 Gmail 應用程式密碼經 SMTP 寄出，課表、初選與分發通知相同；可選 Gmail API）；`INSTRUCTOR` 角色可查本班名單並登錄、修改成績。資料庫升級為 migration `0006`。
 - **移除 Gemini，全部改用本機模型**：中文查詢計畫改由 Llama 3.2 3B 產生並逐欄核對；語音改在 API 容器內以 faster-whisper 轉寫。不再需要 `GEMINI_*` 設定或任何雲端金鑰。
 - **可查證的模型呼叫**：每則助理回覆、API 回應與日誌都附模型伺服器回報的 token 數與耗時。
+- **Gmail 寄信**：選課確認信、課表、初選登記確認與分發結果都用同一種方式寄出，預設為 Gmail 應用程式密碼（SMTP），可改用 Gmail API（`GMAIL_TRANSPORT=api`）。`verify-email` 檢查設定並寄測試信，`retry-failed` 重寄失敗的信。
 
 ## Docker Compose 啟動
 
@@ -34,7 +35,7 @@ sudo docker compose version
 ### 首次部署
 
 ```bash
-git clone --branch v3.0.0 https://github.com/programmerKB/CourseFlow.git
+git clone --branch v3.0.1 https://github.com/programmerKB/CourseFlow.git
 cd CourseFlow
 sudo ./deploy.sh
 ```
@@ -46,7 +47,7 @@ sudo ./deploy.sh
 | 選課系統 | [localhost:8080](http://localhost:8080) |
 | 選課助理 | [localhost:8080/chat](http://localhost:8080/chat) |
 | API 文件 | [localhost:8000/docs](http://localhost:8000/docs) |
-| Mailpit 收信畫面 | [localhost:8025](http://localhost:8025) |
+| Mailpit 預覽信箱（未設定 Gmail 帳號時） | [localhost:8025](http://localhost:8025) |
 | API 健康檢查 | [存活](http://localhost:8000/health/live) · [資料庫就緒](http://localhost:8000/health/ready) |
 
 ### 更新既有部署
@@ -55,13 +56,13 @@ sudo ./deploy.sh
 
 ```bash
 git fetch origin --tags
-git switch --detach v3.0.0
+git switch --detach v3.0.1
 sudo ./deploy.sh --skip-seed
 ```
 
-從 v2.1.0 升級到 v3.0.0 時另需：
+從 v2.1.0 升級到 v3.0.1 時另需：
 
-1. **編輯 `.env`**（可對照 [.env.example](.env.example)）：刪除 `GEMINI_MODEL`、`GEMINI_AUDIO_MODEL`、`GEMINI_API_KEY`；設定 `LLAMA_BASE_URL`（中文與英文助理都需要，Windows 主機的 Ollama 見[教師規格](#使用-windows-本機的-ollamavm-透過-vmware-nat-連線)）；加入 `GMAIL_*`（尚未申請時可先設 `GMAIL_TRANSPORT=dev-smtp`，確認信改寄到 Mailpit）。
+1. **編輯 `.env`**（可對照 [.env.example](.env.example)）：刪除 `GEMINI_MODEL`、`GEMINI_AUDIO_MODEL`、`GEMINI_API_KEY`；設定 `LLAMA_BASE_URL`（中文與英文助理都需要，Windows 主機的 Ollama 見[教師規格](#使用-windows-本機的-ollamavm-透過-vmware-nat-連線)）；設定 Gmail 寄信（`GMAIL_TRANSPORT=smtp`、`SMTP_*` 與應用程式密碼，見[寄信設定](#gmail-寄信選課確認信與所有通知)）；舊的 `GMAIL_TRANSPORT=api` 若不使用 Gmail API 請改成 `smtp`。
 2. **重新建置映像**：不要加 `--no-build`。建置時會下載 Whisper 語音模型（`base` 約 145 MB），之後容器不需連外。
 3. **資料庫**：migration `0006` 自動套用。個人學分上限大於 18 的學期會改為 18 並留稽核紀錄，原有選課保留；`sudo docker compose exec api python -m app.manage credit-overloads` 可列出已選超過 18 學分、需要輔導退選的學生。
 4. **驗證模型**：`sudo docker compose exec api python -m app.verify_llama` 與 `python -m app.verify_assistant`。
@@ -79,13 +80,13 @@ sudo ./deploy.sh --skip-seed
 
 ## 教師規格（SRS 4.0）
 
-3.0.0 依教師提供的 `Database.pdf` 第 1–4 節補齊下列功能。Web 與英文助理呼叫同一個 FastAPI 交易服務，寫入同一個 PostgreSQL。
+3.0.1 依教師提供的 `Database.pdf` 第 1–4 節補齊下列功能。Web 與英文助理呼叫同一個 FastAPI 交易服務，寫入同一個 PostgreSQL。
 
 | 教師項目 | 實作 | 驗收測試 |
 |---|---|---|
 | 英文自然語言加選、退選（T-01、T-09–T-11） | LangGraph 流程 `english_registration`：Llama 3.2 3B 解析意圖，後端檢查明確性後，經指定工具 `add_course`／`drop_course` 寫入 | `test_at37_*`、`test_at38_*` |
 | Web 加選、退選（T-02） | 課程查詢、我的課表 | `test_at39_*`、`e2e.spec.ts` |
-| Gmail API 選課確認信（T-03） | 正式加選交易內建立 `REGISTRATION_CONFIRMATION`，Worker 呼叫 `users.messages.send` 並保存 Gmail 訊息 ID | `test_at40_*`、`test_at41_*` |
+| Gmail 選課確認信（T-03） | 正式加選交易內建立 `REGISTRATION_CONFIRMATION`，Worker 預設以 Gmail SMTP（應用程式密碼）寄出；`GMAIL_TRANSPORT=api` 時改呼叫 Gmail API `users.messages.send`。規格寫的是 Gmail API，見下節說明 | `test_at40_*`、`test_at41_*` |
 | 衝堂、每學期 18 學分（T-04、T-05） | `registration.evaluate_admission` 的上限為 `min(個人上限, 18)`；`student_terms` 另有 `CHECK (credit_limit BETWEEN 0 AND 18)` | `test_at39_*` |
 | 教師名單、成績（T-06、T-07、T-12） | `INSTRUCTOR` 角色、「我的授課」頁、`grades` 表與成績稽核 | `test_at42_*`、`test_at43_*` |
 | PostgreSQL、資料一致（T-08、T-13） | migration `0006` 從 `0005` 升級並保留原 ID | `test_at44_*`、`test_at45_*` |
@@ -169,28 +170,65 @@ Windows 重新開機或 VMware 重新配置網路後，VMnet8 位址可能改變
 
 `verify_llama` 會用助理的實際提示詞送出 6 個探測句，列出模型名稱、是否為 Llama 3.2 3B、延遲與解析結果。每次英文請求都會在 API 日誌留下一筆 JSON，含 `graph`、`model`、`intent`、`tools` 與 `elapsed_ms`，不記錄訊息內容。回應的 `agent` 欄位同樣列出模型與呼叫的工具，畫面以「LangGraph · 模型 · 工具」顯示。
 
-### Gmail API 選課確認信
+### Gmail 寄信（選課確認信與所有通知）
 
-正式加選成功（網頁、英文或中文助理單筆加選、加退選草案確認、初選分發錄取）時，同一交易建立一筆確認信事件。退選、待分發登記、試查及失敗請求不寄確認信；同鍵重送沿用原事件。課表信與分發摘要仍走 SMTP（Mailpit 或 Gmail SMTP）。
+系統寄出的每一封信（選課確認信、「寄送課表」、初選登記確認與分發結果）都使用同一個寄信方式。預設是 **Gmail SMTP + 應用程式密碼**（`GMAIL_TRANSPORT=smtp`）。正式加選成功（網頁、英文或中文助理單筆加選、加退選草案確認、初選分發錄取）時，同一交易建立一筆確認信事件。退選、待分發登記、試查及失敗請求不寄確認信；同鍵重送沿用原事件。
 
-1. 在 Google Cloud Console 啟用 Gmail API，設定 OAuth 同意畫面並把寄件帳號加入測試使用者，建立「電腦版應用程式」OAuth 用戶端。
-2. 取得只含 `gmail.send` 權限的 refresh token。指令會提示輸入用戶端密鑰；在遠端 VM 上可加 `--manual`。
+> 老師規格（`Database.pdf`）的 Email Service 寫的是 **Gmail API**。本專案為了簡化設定，預設改用 Gmail 應用程式密碼（SMTP）寄送；若驗收要求 Gmail API，改設 `GMAIL_TRANSPORT=api`，步驟見下方「改用 Gmail API」。
 
-   ```bash
-   python3 scripts/gmail-oauth.py --client-id <id>.apps.googleusercontent.com
+#### 設定 Gmail 應用程式密碼
+
+1. 用寄件的 Gmail 帳號開啟[兩步驟驗證](https://myaccount.google.com/signinoptions/twosv)。
+2. 到[應用程式密碼](https://myaccount.google.com/apppasswords)建立一組密碼（名稱可填 CourseFlow），複製顯示的 16 碼密碼；中間的空白可留可去，系統會自動移除。
+3. 編輯專案根目錄的 `.env`（`sudo nano .env`）：
+
+   ```ini
+   GMAIL_TRANSPORT=smtp
+   SMTP_HOST=smtp.gmail.com
+   SMTP_PORT=587
+   SMTP_STARTTLS=true
+   SMTP_USER=you@gmail.com
+   SMTP_PASSWORD=abcdefghijklmnop
+   SMTP_FROM=CourseFlow <you@gmail.com>
    ```
 
-3. 把輸出的 `GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET`、`GMAIL_REFRESH_TOKEN` 與 `GMAIL_SENDER` 寫入 `.env`（不要加入 Git），再執行 `sudo ./deploy.sh --skip-seed`。
-4. 驗證授權並把示範學生的信箱改成可收信的測試信箱：
+   `SMTP_FROM` 可省略（預設為 `SMTP_USER`）；Gmail 只允許以登入帳號本身或已設定的別名寄出。
+4. 套用設定並寄一封測試信，再把示範學生的信箱改成可收信的地址（種子資料預設為 `example.test`）：
 
    ```bash
-   sudo docker compose exec api python -m app.manage verify-gmail --send-to you@example.com
+   sudo ./deploy.sh --skip-seed --no-build
+   sudo docker compose exec api python -m app.manage verify-email --send-to you@example.com
    sudo docker compose exec api python -m app.manage set-email --login student05 --email you@example.com
    ```
 
-「教務管理 → Email 通知狀態」顯示「選課確認信（Gmail API）」的狀態、嘗試次數、錯誤代碼與 Gmail 訊息 ID。暫時性錯誤（逾時、429、5xx）最多重試 3 次；未設定（`GMAIL_NOT_CONFIGURED`）、授權失敗（`GMAIL_AUTH_FAILED`）或權限不足時直接記為 `FAILED`。錯誤欄只存固定代碼，不存 Google 回應內容。
+   部署最後的「檢查 Gmail 寄信」也會登入一次 Gmail 並列出缺少的設定。
 
-`GMAIL_TRANSPORT=dev-smtp` 只供本機預覽：同一封信改送 Mailpit，訊息 ID 以 `dev-smtp:` 開頭，不能作為 Gmail API 驗收。
+沒有 Gmail 帳號時，把 `SMTP_HOST=mailpit`、`SMTP_PORT=1025`、`SMTP_STARTTLS=false` 並清空 `SMTP_USER`，信會進內附的 Mailpit 預覽信箱（[localhost:8025](http://localhost:8025)），不會寄到學生信箱。
+
+#### 寄送狀態與重寄
+
+「教務管理 → Email 通知狀態」顯示每封信的狀態、嘗試次數、錯誤代碼、處理提示與訊息 ID（`smtp:` 開頭為 SMTP 寄出）。連線類錯誤最多重試 3 次；帳密或設定錯誤直接記為 `FAILED`。錯誤欄只存固定代碼，不存伺服器回應內容。修正設定後把失敗的信重新排入寄送：
+
+```bash
+sudo docker compose exec api python -m app.manage retry-failed                       # 全部 FAILED
+sudo docker compose exec api python -m app.manage retry-failed --error SMTP_AUTH_FAILED
+```
+
+| 錯誤代碼 | 原因與處理 |
+|---|---|
+| `SMTP_NOT_CONFIGURED` | `SMTP_HOST` 是 `smtp.gmail.com`，但 `SMTP_USER` 或 `SMTP_PASSWORD` 未填 |
+| `SMTP_AUTH_FAILED` | Gmail 拒絕登入：密碼須是 16 碼應用程式密碼（不是 Gmail 登入密碼），`SMTP_USER` 須是完整 Gmail 地址 |
+| `SMTP_UNREACHABLE` | 連不到伺服器：核對 `SMTP_HOST`、`SMTP_PORT` 與主機對外網路，Worker 會自動重試 |
+| `SMTP_STARTTLS_UNSUPPORTED` | 伺服器不支援 STARTTLS：Gmail 使用 `smtp.gmail.com:587` 並設 `SMTP_STARTTLS=true` |
+| `SMTP_AUTH_UNSUPPORTED` | 連到不支援登入的伺服器（例如 Mailpit）卻填了帳密 |
+
+#### 改用 Gmail API（選用）
+
+設 `GMAIL_TRANSPORT=api` 後改用 Gmail API 的 `users.messages.send`，需要 Google Cloud 的 OAuth 用戶端：
+
+1. 在 Google Cloud Console 啟用 Gmail API，「目標對象」加入寄件帳號為測試使用者，建立「電腦版應用程式」OAuth 用戶端。
+2. 執行 `python3 scripts/gmail-oauth.py --client-id <用戶端ID> --manual` 取得 refresh token。
+3. 在 `.env` 設定 `GMAIL_TRANSPORT=api`、`GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET`、`GMAIL_REFRESH_TOKEN`、`GMAIL_SENDER`，再執行 `verify-email`。測試狀態的 OAuth 應用程式，refresh token 約 7 天失效，失效後重跑第 2 步。錯誤代碼為 `GMAIL_*`，處理提示會顯示在管理頁與 `verify-email` 輸出。
 
 ### 授課教師名單與成績
 
@@ -207,7 +245,7 @@ Windows 重新開機或 VMware 重新配置網路後，VMnet8 位址可能改變
 使用隔離環境：`.env` 設 `PUBLIC_INITIAL_TERM_ID=`，首次部署 `sudo ./deploy.sh --scenario add-drop --llm`。種子讓 `student05` 在 115-1 已有 15 學分（CS201、CS301、EE101、EE301、EE302）。
 
 1. `student05` 登入，在網頁或英文助理查看 15 學分課表。
-2. 英文助理輸入 `Please enroll me in CS101, section A.`。CS101 A 與 CS201 A 首尾相接，加選後為 18 學分，回覆顯示確認信已排入 Gmail API 寄送。
+2. 英文助理輸入 `Please enroll me in CS101, section A.`。CS101 A 與 CS201 A 首尾相接，加選後為 18 學分，回覆顯示確認信已排入 Gmail 寄送。
 3. `I'd like to add CS303 A.` 回 `CREDIT_LIMIT_EXCEEDED`（21 學分）；`Please enroll me in CS302, section A.` 回 `TIME_CONFLICT` 並列出衝突班別。
 4. `Please drop CS101, section A.` 後到網頁「我的課表」確認回到 15 學分。
 5. 以 `teacher01` 登入「我的授課」，開啟 CS301 A，為 `B11500005` 登錄 82 分再改成 90 分。改用學生帳號呼叫同一個 API 會得到 `403`。
@@ -332,7 +370,7 @@ sudo ./deploy.sh --scenario short
 3. 在 `awaiting` 或 `short` 主學期，管理員進入「教務管理」執行「分發並公布」，查看錄取與未錄取數；重送返回同一批次。
 4. 加退選學期以 student19 退選 CS304，再以 student01 加選，檢查名額、總學分與正式課表。
 5. 在選課助理詢問「找這學期星期二還有空位的電子系課」，點開來源核對班別。這個問法直接查詢公開課程資料。
-6. 展示研究推薦、試排與確認流程。在「我的課表」點「寄送課表」，再開啟 Mailpit 查看郵件。管理頁可查詢寄送狀態。
+6. 展示研究推薦、試排與確認流程。在「我的課表」點「寄送課表」，信會經 Gmail 寄到學生信箱（先以 `set-email` 改成可收信的地址）。管理頁可查詢寄送狀態與 Gmail 訊息 ID。
 
 ### 研究方向推薦與批次選課
 
@@ -400,57 +438,6 @@ WHISPER_PRELOAD=true      # API 啟動後先在背景載入模型
 
 轉寫提示詞包含選課常用語（加選、退選、試排、課號與班別），讓課號維持「CS101 A 班」的寫法；偶爾出現的簡體字以 OpenCC 轉成臺灣繁體。平均信心過低、文字重複或只是重述提示詞時回 `422 VOICE_UNCLEAR`，不會送出加選。模型載入失敗時回 `503 VOICE_UNAVAILABLE`，API 日誌只記錄錯誤類別（`whisper_preload_failed` 或 `voice_unavailable`）。
 
-## Email 設定與 SMTP 錯誤排查
-
-本節的 SMTP 設定用於課表信與分發摘要。正式選課確認信使用 Gmail API，設定見 [Gmail API 選課確認信](#gmail-api-選課確認信)。課表信列出正式選課、待分發班別、上課時間、教室和學分。管理員可在「教務管理 → Email 通知狀態」查閱 Worker 處理結果。
-
-### Mailpit 測試收信
-
-預設將通知送到 Mailpit。用瀏覽器開啟收信畫面，即可檢查寄送內容。 [Mailpit 收信畫面](http://localhost:8025)
-
-```dotenv
-SMTP_HOST=mailpit
-SMTP_PORT=1025
-SMTP_STARTTLS=false
-SMTP_USER=
-SMTP_PASSWORD=
-SMTP_FROM=courses@example.test
-```
-
-### Gmail 寄送
-
-透過 Gmail SMTP 寄信時，在專案 `.env` 設定寄件地址與應用程式密碼。
-
-```dotenv
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_STARTTLS=true
-SMTP_USER=yourname@gmail.com
-SMTP_PASSWORD=Google產生的16碼應用程式密碼
-SMTP_FROM=yourname@gmail.com
-```
-
-Google 帳戶需先開啟兩步驟驗證，再到[應用程式密碼](https://myaccount.google.com/apppasswords)建立 CourseFlow 專用密碼。依 [Google SMTP 文件](https://developers.google.com/workspace/gmail/imap/imap-smtp)，此設定使用 587 與 STARTTLS。學生的 `users.email` 也必須改為真實收件地址，種子資料預設為 `example.test`。
-
-修改後重新建立 Worker；使用 `--build` 時也會載入本目錄最新的錯誤診斷程式：
-
-```bash
-sudo docker compose up -d --build --no-deps --force-recreate worker
-sudo docker compose exec worker python -c 'import os; print({k: os.getenv(k) for k in ("SMTP_HOST", "SMTP_PORT", "SMTP_STARTTLS")})'
-```
-
-Gmail 應顯示 `smtp.gmail.com`、`587`、`true`。這個檢查不會輸出帳號、密碼；不要以完整環境或完整 Compose 設定作為公開的除錯輸出。
-
-| 日誌錯誤碼 | 原因與處理 |
-|---|---|
-| `SMTP_AUTH_UNSUPPORTED` | 目前伺服器未提供帳密驗證。若顯示 `mailpit:1025` 卻填入 Gmail 帳密，請將主機、埠及 TLS 一起改成 Gmail；使用 Mailpit 則清空帳密。 |
-| `SMTP_STARTTLS_UNSUPPORTED` | 所連伺服器沒有 STARTTLS。請核對主機與埠；程式不會降級為明文登入。 |
-| `SMTPAuthenticationError` | SMTP 認證未通過，請確認寄件帳號與該帳號產生的應用程式密碼。 |
-
-舊版 Worker 的 `SMTPNotSupportedError` 可能是前兩項原因；新版日誌會顯示明確錯誤碼及固定提示，不輸出憑證。Mailpit 預設不使用加密或驗證，詳見 [Mailpit SMTP 文件](https://mailpit.axllent.org/docs/configuration/smtp/)。
-
-設定修正後，可在「我的課表」點「寄送課表」，並在「教務管理 → Email 通知狀態」查看寄送結果。未達三次的待寄通知依原排程重試。已達三次的 `FAILED` 通知會保留既有結果。
-
 ## 自動測試
 
 ### 後端與部署
@@ -471,7 +458,7 @@ PUBLIC_DATABASE_URL=postgresql+psycopg://course_public:course_public@127.0.0.1:5
 .venv/bin/python backend/run_tests.py
 ```
 
-教師規格驗收（AT-37–AT-45）在 `backend/tests/test_teacher_spec.py`。英文流程使用 `CHAT_STUB=true` 的固定意圖解析，經過與 Llama 相同的 LangGraph 防護、工具與交易；Llama 與 Gmail 的 HTTP 格式、錯誤與重試以模擬傳輸驗證。實機 Llama 與 Gmail 驗收請依[教師規格](#教師規格srs-40)的 `verify_llama`、`verify-gmail` 步驟另外執行。
+教師規格驗收（AT-37–AT-45）在 `backend/tests/test_teacher_spec.py`。英文流程使用 `CHAT_STUB=true` 的固定意圖解析，經過與 Llama 相同的 LangGraph 防護、工具與交易；Llama 與 Gmail 的 HTTP 格式、錯誤與重試以模擬傳輸驗證。實機 Llama 與 Gmail 驗收請依[教師規格](#教師規格srs-40)的 `verify_llama`、`verify-email` 步驟另外執行。
 
 部署腳本可用 `python3 -m unittest discover -s scripts/tests -v` 驗證。測試會使用模擬 Docker CLI。
 
@@ -499,7 +486,7 @@ E2E_BASE_URL=http://localhost:5173 npm run test:e2e
 
 本機入口為 http://localhost:5173 與 http://localhost:8000/docs；資料庫使用 loopback 55432，資料存於 `.runtime/pgdata`。本機資料庫是展示用 trust 認證，僅監聽 `127.0.0.1`；Compose 則使用各用途的密碼角色。Ctrl+C 停止腳本啟動的應用程序，PostgreSQL 資料保留。
 
-若有 Mailpit 可執行檔，可將它放在 `.runtime/mailpit`，腳本會啟動 SMTP 1025 與 Web 8025。本機腳本使用 Mailpit 的無帳密設定。SMTP 暫時無法使用時，郵件依 Outbox 規則重試。
+若有 Mailpit 可執行檔，可將它放在 `.runtime/mailpit`，腳本會啟動 SMTP 1025 與 Web 8025，本機腳本固定把信寄到這個 Mailpit。寄送失敗時依 Outbox 規則重試。
 
 模型位址等設定可放入專案根目錄的 `.env`。測試用文字分類可用 `CHAT_STUB=true ./scripts/run-local.sh`。語音端點在本機以 faster-whisper 轉寫，第一次使用會把 `WHISPER_MODEL`（base 約 145 MB）下載到 Hugging Face 快取；整合測試以替身模型驗證轉寫狀態與繁體轉換。
 
@@ -533,17 +520,17 @@ backend/app/english_agent.py 英文加退選 LangGraph 流程、防護規則與�
 backend/app/llama.py        Llama 3.2 3B 用戶端（Ollama 或 OpenAI 相容端點），兩個助理共用
 backend/app/voice.py        錄音驗證、FFmpeg 轉檔與 faster-whisper 本機轉寫
 backend/app/instructor.py   教師名單、成績與稽核
-backend/app/gmail.py        Gmail API OAuth 與 users.messages.send
-backend/app/manage.py       verify-gmail、set-email、credit-overloads 維運指令
+backend/app/gmail.py        通知信內容與選用的 Gmail API（OAuth、users.messages.send）
+backend/app/manage.py       verify-email、set-email、retry-failed、credit-overloads 維運指令
 backend/app/recommendation.py 主題排行、資格試排、草案與來源證據
-backend/app/worker.py       Outbox Worker：確認信走 Gmail API，其他通知走 SMTP
+backend/app/worker.py       Outbox Worker：通知信經 Gmail SMTP（預設）或 Gmail API 寄出
 backend/app/seed.py         固定 ID 的可重複種子資料
 backend/alembic/            migration、固定初版 DDL 與公開 View
-backend/tests/             PostgreSQL 整合、併發、SMTP 與效能測試
+backend/tests/             PostgreSQL 整合、併發、Gmail 寄信與效能測試
 scripts/                   初始化、本機開發、gmail-oauth.py、check-ollama.sh 及 windows/setup-ollama.ps1
 compose.yaml               PostgreSQL、migration、API、前端、通知、HTTPS 及選用 Ollama
 ```
 
 [架構、核心 ERD 與交易設計](docs/architecture.md)、[SQL 與 EXPLAIN ANALYZE BUFFERS](docs/explain.txt)、[效能數據](docs/performance.json)、[課程查詢畫面](docs/desktop.png)、[手機畫面](docs/mobile.png)。
 
-本版驗收紀錄見 [v3.0.0 驗證報告](docs/verification-v3.0.md)。歷史驗收紀錄可參閱 [v2.0.0 驗證報告](docs/verification-v2.md) 與 [v1.0.0 驗證紀錄](docs/verification.md)。
+本版驗收紀錄見 [v3.0.1 驗證報告](docs/verification-v3.0.1.md)。歷史驗收紀錄可參閱 [v2.0.0 驗證報告](docs/verification-v2.md) 與 [v1.0.0 驗證紀錄](docs/verification.md)。

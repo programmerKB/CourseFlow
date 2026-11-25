@@ -29,12 +29,6 @@ class Settings(BaseSettings):
     initial_end_at: AwareDatetime | None = None
     session_hours: int = 24
     chat_stub: bool = False
-    smtp_host: str = 'mailpit'
-    smtp_port: int = 1025
-    smtp_user: str = ''
-    smtp_password: str = ''
-    smtp_from: str = '選課通知 <courses@example.test>'
-    smtp_starttls: bool = False
     # Both assistants use the local Llama 3.2 3B behind an Ollama or OpenAI-compatible endpoint:
     # English add/drop (FR-21/22) and the Chinese assistant's query plans. No cloud model is used.
     llama_base_url: str = ''
@@ -49,8 +43,17 @@ class Settings(BaseSettings):
     whisper_compute_type: str = 'int8'
     whisper_cpu_threads: int = 2
     whisper_preload: bool = False
-    # Registration confirmations (FR-24) use the Gmail API. dev-smtp is a local preview only.
-    gmail_transport: Literal['api', 'dev-smtp'] = 'api'
+    # Email transport. smtp (default): Gmail SMTP with an app password (smtp.gmail.com:587,
+    # STARTTLS); with the default SMTP_HOST=mailpit and no account, mail lands in the local Mailpit.
+    # api: the Gmail API (OAuth refresh token, users.messages.send), as the teacher spec names it.
+    # The older value dev-smtp is accepted as smtp.
+    gmail_transport: Literal['smtp', 'api'] = 'smtp'
+    smtp_host: str = 'mailpit'
+    smtp_port: int = 1025
+    smtp_user: str = ''
+    smtp_password: SecretStr = SecretStr('')
+    smtp_from: str = ''
+    smtp_starttls: bool = False
     gmail_client_id: str = ''
     gmail_client_secret: SecretStr = SecretStr('')
     gmail_refresh_token: SecretStr = SecretStr('')
@@ -65,6 +68,18 @@ class Settings(BaseSettings):
             if url.username is not None or url.password is not None or url.query is not None:
                 raise ValueError('LLAMA_BASE_URL must be a plain HTTP(S) base URL without credentials or parameters.')
         return value
+
+    @field_validator('smtp_host', 'smtp_user', 'smtp_from', 'gmail_sender', 'gmail_client_id', mode='before')
+    @classmethod
+    def strip_text(cls, value):
+        # A stray space after a value in .env must not turn into a DNS or login failure.
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator('gmail_transport', mode='before')
+    @classmethod
+    def legacy_transport(cls, value):
+        value = value.strip().lower() if isinstance(value, str) else value
+        return 'smtp' if value in ('dev-smtp', '', None) else value
 
     @field_validator('whisper_cpu_threads')
     @classmethod

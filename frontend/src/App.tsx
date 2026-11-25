@@ -216,6 +216,22 @@ function Meetings({ items }: { items: Meeting[] }) {
   );
 }
 
+// Fixed hints for the email error codes the worker stores (no provider text is stored).
+const GMAIL_HINTS: Record<string, string> = {
+  SMTP_NOT_CONFIGURED: "尚未填寫 SMTP_USER 與 SMTP_PASSWORD（Gmail 應用程式密碼），填好後執行 manage retry-failed 重寄。",
+  SMTP_AUTH_FAILED: "Gmail 拒絕登入：SMTP_PASSWORD 須是 16 碼應用程式密碼，修正後執行 manage retry-failed 重寄。",
+  SMTP_UNREACHABLE: "連不到 SMTP 伺服器，稍後自動重試；請核對 SMTP_HOST 與 SMTP_PORT。",
+  SMTP_STARTTLS_UNSUPPORTED: "伺服器不支援 STARTTLS，請核對 SMTP_HOST、SMTP_PORT 與 SMTP_STARTTLS。",
+  SMTP_AUTH_UNSUPPORTED: "伺服器不支援帳密登入；寄真實郵件請改用 smtp.gmail.com。",
+  GMAIL_NOT_CONFIGURED: "尚未設定 Gmail API。設定 GMAIL_* 後執行 manage retry-failed 重寄。",
+  GMAIL_AUTH_FAILED: "OAuth 授權無效或已撤銷，請重新取得 refresh token。",
+  GMAIL_FORBIDDEN: "寄件帳號未授權 gmail.send，或 GMAIL_SENDER 不是授權帳號。",
+  GMAIL_REJECTED: "Gmail 拒絕此信，請檢查收件信箱。",
+  GMAIL_RATE_LIMITED: "超過 Gmail 寄信上限，稍後自動重試。",
+  GMAIL_TIMEOUT: "連線逾時，稍後自動重試。",
+  GMAIL_UNAVAILABLE: "Gmail API 暫時無法使用，稍後自動重試。",
+};
+
 export default function App() {
   const [view, setView] = useState<View>(route),
     [user, setUser] = useState<User | null>(null),
@@ -1372,7 +1388,7 @@ export default function App() {
                         {m.action.status === "DROPPED" ? "已退選" : "已加選"} {m.action.course_code ?? ""}{" "}
                         {m.action.course_title} {m.action.section_no} 班 · 本學期正式選課 {m.action.total_credits} 學分
                         · 此班剩餘 {m.action.remaining} 席
-                        {m.action.status === "ENROLLED" && m.action.notification_id && " · 選課確認信已排入寄送（Gmail API）"}
+                        {m.action.status === "ENROLLED" && m.action.notification_id && " · 選課確認信已排入寄送（Gmail）"}
                       </p>
                     )}
                     {m.agent && (
@@ -1534,7 +1550,7 @@ export default function App() {
                     ],
                     [
                       "即時加退選",
-                      "分發公布且加退選期間開放時，可在網頁或英文選課助理加選、退選，兩者執行同一套檢查。加選成功後以 Gmail API 寄出選課確認信。",
+                      "分發公布且加退選期間開放時，可在網頁或英文選課助理加選、退選，兩者執行同一套檢查。加選成功後以 Gmail 寄出選課確認信。",
                     ],
                   ].map(([h, p]) => (
                     <div key={h}>
@@ -2144,7 +2160,7 @@ function Admin({
             <div className="panel-title">
               <div>
                 <h2>Email 通知狀態</h2>
-                <p>最近 100 筆寄送紀錄</p>
+                <p>最近 100 筆寄送紀錄 · 通知信經 Gmail 寄出（訊息 ID 以 smtp: 開頭為 Gmail SMTP，其餘為 Gmail API）</p>
               </div>
               <button className="small" onClick={onRefresh}>
                 更新狀態
@@ -2159,7 +2175,7 @@ function Admin({
                     <th>嘗試次數</th>
                     <th>寄送時間 / 下次嘗試</th>
                     <th>錯誤摘要</th>
-                    <th>Gmail 訊息 ID</th>
+                    <th>訊息 ID</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2170,7 +2186,7 @@ function Admin({
                           ALLOCATION: "分發摘要",
                           TIMETABLE: "課表寄送",
                           INITIAL_RECEIPT: "初選登記確認",
-                          REGISTRATION_CONFIRMATION: "選課確認信（Gmail API）",
+                          REGISTRATION_CONFIRMATION: "選課確認信",
                           ENROLLED: "加選成功",
                           DROPPED: "退選成功",
                         }[n.type as string] || n.type}
@@ -2181,7 +2197,10 @@ function Admin({
                       </td>
                       <td>{n.attempt_count} / 3</td>
                       <td>{dateTime(n.sent_at || n.next_attempt_at)}</td>
-                      <td>{n.last_error || "—"}</td>
+                      <td>
+                        {n.last_error || "—"}
+                        {n.last_error && GMAIL_HINTS[n.last_error] && <small>{GMAIL_HINTS[n.last_error]}</small>}
+                      </td>
                       <td>{n.provider_message_id || "—"}</td>
                     </tr>
                   ))}

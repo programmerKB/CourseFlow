@@ -20,6 +20,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 import secrets
 import sys
 import urllib.error
@@ -29,6 +30,25 @@ import urllib.request
 AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 TOKEN_URL = 'https://oauth2.googleapis.com/token'
 SCOPE = 'https://www.googleapis.com/auth/gmail.send'
+# Google OAuth client IDs look like 123456789012-abc123def456.apps.googleusercontent.com
+CLIENT_ID = re.compile(r'\d{6,}-[a-z0-9]{8,}\.apps\.googleusercontent\.com')
+
+
+def check_client_id(value):
+    """Catch the usual copy mistakes before Google answers 401 invalid_client ("OAuth client was not found")."""
+    value = value.strip().strip('"\'<>')
+    if CLIENT_ID.fullmatch(value):
+        return value
+    if value.startswith('GOCSPX-'):
+        reason = 'this is the client SECRET (GOCSPX-...). Pass the client ID instead.'
+    elif not value.isascii() or 'your' in value.lower() or value.startswith('<'):
+        reason = 'this is still the example placeholder. Paste your real client ID.'
+    elif not value.endswith('.apps.googleusercontent.com'):
+        reason = 'a client ID ends with .apps.googleusercontent.com (copy the whole value).'
+    else:
+        reason = 'the value is incomplete or has extra characters (expected digits-letters.apps.googleusercontent.com).'
+    sys.exit('Invalid --client-id: ' + reason + '\nFind it in Google Cloud Console > APIs & Services > Credentials > '
+             'OAuth 2.0 Client IDs (type "Desktop app"), in the same project where the Gmail API is enabled.')
 
 
 def wait_for_code(port, state):
@@ -64,6 +84,7 @@ def main():
     parser.add_argument('--port', type=int, default=0, help='Loopback port (default: random free port).')
     parser.add_argument('--manual', action='store_true', help='Paste the final browser URL instead of listening.')
     args = parser.parse_args()
+    args.client_id = check_client_id(args.client_id)
     secret = os.environ.get('GMAIL_CLIENT_SECRET') or getpass.getpass('OAuth client secret: ')
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
