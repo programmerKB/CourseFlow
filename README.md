@@ -13,7 +13,7 @@
 - **教師規格（SRS 4.0）**：英文自然語言加選、退選（LangGraph + Llama 3.2 3B）；網頁與助理共用衝堂與每學期 18 學分檢查；正式選課後以 Gmail 寄確認信（預設用 Gmail 應用程式密碼經 SMTP 寄出，課表、初選與分發通知相同；可選 Gmail API）；`INSTRUCTOR` 角色可查本班名單並登錄、修改成績。資料庫升級為 migration `0006`。
 - **移除 Gemini，全部改用本機模型**：中文查詢計畫改由 Llama 3.2 3B 產生並逐欄核對；語音改在 API 容器內以 faster-whisper 轉寫。不再需要 `GEMINI_*` 設定或任何雲端金鑰。
 - **可查證的模型呼叫**：每則助理回覆、API 回應與日誌都附模型伺服器回報的 token 數與耗時。
-- **Gmail 寄信**：選課確認信、課表、初選登記確認與分發結果都用同一種方式寄出，預設為 Gmail 應用程式密碼（SMTP），可改用 Gmail API（`GMAIL_TRANSPORT=api`）。`verify-email` 檢查設定並寄測試信，`retry-failed` 重寄失敗的信。
+- **Gmail 寄信**：選課確認信、課表與分發結果都用同一種方式寄出，預設為 Gmail 應用程式密碼（SMTP），可改用 Gmail API（`GMAIL_TRANSPORT=api`）。`verify-email` 檢查設定並寄測試信，`retry-failed` 重寄失敗的信。
 
 ## Docker Compose 啟動
 
@@ -172,7 +172,7 @@ Windows 重新開機或 VMware 重新配置網路後，VMnet8 位址可能改變
 
 ### Gmail 寄信（選課確認信與所有通知）
 
-系統寄出的每一封信（選課確認信、「寄送課表」、初選登記確認與分發結果）都使用同一個寄信方式。預設是 **Gmail SMTP + 應用程式密碼**（`GMAIL_TRANSPORT=smtp`）。正式加選成功（網頁、英文或中文助理單筆加選、加退選草案確認、初選分發錄取）時，同一交易建立一筆確認信事件。退選、待分發登記、試查及失敗請求不寄確認信；同鍵重送沿用原事件。
+系統寄出的每一封信（選課確認信、「寄送課表」與分發結果）都使用同一個寄信方式。預設是 **Gmail SMTP + 應用程式密碼**（`GMAIL_TRANSPORT=smtp`）。正式加選成功（網頁、英文或中文助理單筆加選、加退選草案確認、初選分發錄取）時，同一交易建立一筆確認信事件。退選、待分發登記、試查及失敗請求不寄確認信；同鍵重送沿用原事件。
 
 > 老師規格（`Database.pdf`）的 Email Service 寫的是 **Gmail API**。本專案為了簡化設定，預設改用 Gmail 應用程式密碼（SMTP）寄送；若驗收要求 Gmail API，改設 `GMAIL_TRANSPORT=api`，步驟見下方「改用 Gmail API」。
 

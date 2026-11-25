@@ -1,6 +1,6 @@
 """Transactional outbox: leases committed before delivery, token guarded completion.
 
-Every email (registration confirmations, timetables, initial-registration receipts and allocation
+Every email (registration confirmations, timetables and allocation
 results) uses one transport chosen by GMAIL_TRANSPORT:
 
 * ``smtp`` (default): Gmail SMTP with an app password (smtp.gmail.com:587, STARTTLS). With the

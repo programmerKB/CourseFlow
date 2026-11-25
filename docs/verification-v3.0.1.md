@@ -74,7 +74,7 @@ VM（VMware NAT，`192.168.169.128`）經 `LLAMA_BASE_URL=http://192.168.169.1:1
 
 曾將所有通知信改經 Gmail API；因 OAuth 用戶端、測試使用者與 7 天失效的 refresh token 設定繁瑣，依使用者決定改回 **Gmail SMTP + 應用程式密碼** 作為預設（`GMAIL_TRANSPORT=smtp`），Gmail API 保留為選項（`GMAIL_TRANSPORT=api`）。**這與 `Database.pdf`「Email Service：Gmail API」不同**，驗收若要求 Gmail API，改設 `api` 並依 README 取得 OAuth 憑證即可，程式與測試兩條路徑都保留。
 
-- 兩種方式寄出的信種相同：選課確認、課表、初選登記確認、分發結果，皆保存訊息 ID（SMTP 以 `smtp:` 開頭）。
+- 兩種方式寄出的信種相同：選課確認、課表、分發結果，皆保存訊息 ID（SMTP 以 `smtp:` 開頭）。
 - SMTP 一律先 STARTTLS 再登入，不降級為明文；應用程式密碼的空白自動移除；帳密錯誤記為 `SMTP_AUTH_FAILED`、未填帳號記為 `SMTP_NOT_CONFIGURED`，都不重試，修正後以 `retry-failed` 重寄；連線失敗記為 `SMTP_UNREACHABLE` 並自動重試。錯誤欄只存固定代碼。
 - `python -m app.manage verify-email [--send-to]` 依設定檢查 Gmail SMTP 登入或 Gmail API 授權，列出缺少的欄位名稱（不印出值）；部署最後的「檢查 Gmail 寄信」呼叫同一指令，失敗只警告。
 - 以模擬 SMTP 伺服器驗證 TLS 與登入順序、登入失敗、未設定與連線失敗；瀏覽器回歸後以預設 SMTP 清空佇列，4 封確認信與 1 封課表信進入真實 Mailpit。Gmail API 路徑以模擬 Gmail 傳輸驗證。實際寄到 Gmail 仍待使用者填入應用程式密碼後執行 `verify-email --send-to`。

@@ -3,18 +3,18 @@
 | 項目 | 內容 |
 |---|---|
 | 專題 | 國立臺灣科技大學 資料庫設計期末專題 |
-| 文件版本 | 4.0｜依教師正式規格修訂 |
-| 日期 | 2026-11-24（Asia/Taipei） |
+| 文件版本 | 4.1｜依教師正式規格修訂，並更新為 `v3.0.1` 的實作結果 |
+| 日期 | 2026-11-26（Asia/Taipei）。4.0 版為 2026-11-24 |
 | 驗收依據 | 教師提供的 `Database.pdf`，University Course Registration System，第 1–4 節 |
-| 程式基準 | GitHub `main` 提交 `a9c28f3`，同一提交標籤 `v2.1.0`。[固定提交](https://github.com/programmerKB/CourseFlow/commit/a9c28f3269fca5a61d5c300ff1268f6026603c77) · [版本標籤](https://github.com/programmerKB/CourseFlow/tree/v2.1.0) |
-| 課程指定技術 | PostgreSQL、LangGraph、Llama 3.2 3B、Gmail API、Web 介面與自然語言助理 |
-| 專題既有技術 | React、TypeScript、FastAPI、SQLAlchemy、Alembic、Docker Compose、Git、GitHub |
+| 程式基準 | 目前版本：GitHub `main` 提交 `fa2e6b2`，標籤 `v3.0.1`。[固定提交](https://github.com/programmerKB/CourseFlow/commit/fa2e6b230122c7ad88c9db486c21eebc22a6b375) · [版本標籤](https://github.com/programmerKB/CourseFlow/tree/v3.0.1)。開發起點為 `v2.1.0`（`a9c28f3`），見 §1.2 |
+| 課程指定技術 | PostgreSQL、LangGraph、Llama 3.2 3B、Gmail API、Web 介面與自然語言助理。`v3.0.1` 寄信預設改用 Gmail 應用程式密碼（SMTP），Gmail API 為可切換選項，差異見 §7.2 |
+| 專題既有技術 | React、TypeScript、FastAPI、SQLAlchemy、Alembic、Docker Compose、Git、GitHub。`v3.0.1` 另用 Ollama 提供 Llama 3.2 3B、faster-whisper 轉寫語音，不使用雲端語言模型 |
 
 ## 1. 系統目標與設計依據
 
-交付版須讓學生由網頁或英文自然語言助理完成正式加退選。兩個入口使用同一套選課交易與同一個 PostgreSQL 資料庫，檢查衝堂、18 學分上限、重複課及名額。正式加選完成後，系統自動透過 Gmail API 寄送選課確認信。授課教師登入後可查本班正式名單，輸入及更新個別學生的成績。
+交付版須讓學生由網頁或英文自然語言助理完成正式加退選。兩個入口使用同一套選課交易與同一個 PostgreSQL 資料庫，檢查衝堂、18 學分上限、重複課及名額。正式加選完成後，系統自動以 Gmail 寄送選課確認信。授課教師登入後可查本班正式名單，輸入及更新個別學生的成績。
 
-CourseFlow `v2.1.0` 提供初選、分發、週課表、中文語音、三校電資課庫與研究方向試排。這些功能納入回歸驗收。以 P0 展示教師規格，P1 維護既有擴充，P2 記錄後續構想。本文件擬定的新 API、資料表和通知時點均以需求條款表示。
+CourseFlow `v2.1.0` 提供初選、分發、週課表、中文語音、三校電資課庫與研究方向試排。這些功能納入回歸驗收。以 P0 展示教師規格，P1 維護既有擴充，P2 記錄後續構想。本文件的 API、資料表和通知時點以需求條款表示；`v3.0.1` 已依本文件實作，逐項狀態見 §1.3、§1.4，驗收證據見 §9.2。
 
 | 官方參考 | 本專題採用的設計 | 來源 |
 |---|---|---|
@@ -43,7 +43,9 @@ FR-14 擴充課程名稱參考國立臺灣大學、國立臺灣師範大學及�
 
 主題至少涵蓋大型語言模型與語音、機器學習與電腦視覺、資料庫與分散式系統、計算機結構與嵌入式、半導體與 IC 設計、訊號與通訊、控制與電力。可用「記憶體系統」尋找高等計算機結構、儲存系統架構與應用。「邊緣 AI」可連到嵌入式深度神經網路處理。課號示例 `NTUST-ET-001` 代表專題內的臺科大電子系高等計算機結構。
 
-### 1.2 GitHub v2.1.0 實作基準
+### 1.2 GitHub v2.1.0 開發起點
+
+下表為本版開始開發時的 `v2.1.0` 行為，保留作為回歸對照。`v3.0.1` 的變更見 §1.4。
 
 | 功能 | 截至 `a9c28f3` 的版本行為 | 程式與文件 |
 |---|---|---|
@@ -57,23 +59,36 @@ FR-14 擴充課程名稱參考國立臺灣大學、國立臺灣師範大學及�
 
 ### 1.3 教師規格與驗收追蹤
 
-下列 T 編號為本文件依 `Database.pdf` 第 2–4 節整理。右欄編號對應 §3 的功能需求與 §9 的驗收情境。
+下列 T 編號為本文件依 `Database.pdf` 第 2–4 節整理。「需求與驗收」對應 §3 的功能需求與 §9 的驗收情境，「`v3.0.1` 狀態」為目前程式的實作與驗證結果。
 
-| 教師項目 | 要求 | 需求與驗收 |
+| 教師項目 | 要求 | 需求與驗收 | `v3.0.1` 狀態 |
+|---|---|---|---|
+| T-01 | 學生以英文自然語言完成加選、退選。 | FR-21、AT-37、AT-38 | 完成。實機 Llama 3.2 3B 以多種英文問法加選、退選（§9.2） |
+| T-02 | 學生透過 Web 介面完成加選、退選。 | FR-05、AT-08、AT-45 | 完成。網頁加退選與英文助理共用同一交易 |
+| T-03 | 完成選課後收到 Gmail 確認信，寄送使用 Gmail API。 | FR-24、AT-40、AT-41 | 功能完成，實寄待驗。所有通知信經 Gmail 寄出：預設 Gmail SMTP 應用程式密碼，`GMAIL_TRANSPORT=api` 改用 Gmail API（規格寫 Gmail API，見 §7.2）。真實寄送依 AT-40 補驗 |
+| T-04 | 阻止上課時段重疊，兩個入口執行同一限制。 | FR-23、AT-39 | 完成。網頁與英文助理回相同 `TIME_CONFLICT`，首尾相接可選 |
+| T-05 | 每位學生每學期最多 18 學分，兩個入口執行同一限制。 | FR-23、AT-39、AT-44 | 完成。上限 `min(個人上限, 18)`，資料庫另有 `CHECK (credit_limit BETWEEN 0 AND 18)` |
+| T-06 | 教師可查授課班別的已選學生名單。 | FR-25、AT-42 | 完成。「我的授課」只列本人班別的 `ENROLLED` 學生 |
+| T-07 | 教師可新增與更新個別學生的成績。 | FR-26、AT-43 | 完成。0–100 分、兩位小數，新增與修改皆留稽核 |
+| T-08 | 系統以 PostgreSQL 保存資料。 | FR-22、AT-13、AT-44 | 完成。migration `0006`；Docker 全新冷啟與重啟（AT-13）待在部署主機補驗 |
+| T-09 | 選課 Agent 採用 LangGraph。 | FR-22、AT-37、AT-38 | 完成。`english_registration` 與中文 `course_assistant` 兩個 LangGraph 流程 |
+| T-10 | 語言模型使用 Llama 3.2 3B。 | FR-22、AT-37 | 完成。英文意圖與中文查詢計畫皆用 `llama3.2:3b`（Ollama），不使用雲端模型 |
+| T-11 | Agent 經指定工具與 PostgreSQL 互動。 | FR-09、FR-22、AT-10、AT-38 | 完成。模型只提出結構化意圖或計畫，由指定工具與參數化查詢存取 PostgreSQL |
+| T-12 | 學生與教師具有獨立權限。 | FR-27、AT-42、AT-43 | 完成。`STUDENT`、`INSTRUCTOR`、`ADMIN` 分別檢查，跨角色回 `403`、他班回 `404` |
+| T-13 | Web 與助理共用資料庫，選課狀態一致。 | FR-05、FR-06、FR-22、AT-45 | 完成。兩入口使用同一修課 ID，教師名單同步 |
+
+### 1.4 v3.0.1 實作摘要
+
+| 項目 | `v3.0.1` 的做法 | 程式與文件 |
 |---|---|---|
-| T-01 | 學生以英文自然語言完成加選、退選。 | FR-21、AT-37、AT-38 |
-| T-02 | 學生透過 Web 介面完成加選、退選。 | FR-05、AT-08、AT-45 |
-| T-03 | 完成選課後收到 Gmail 確認信，寄送使用 Gmail API。 | FR-24、AT-40、AT-41 |
-| T-04 | 阻止上課時段重疊，兩個入口執行同一限制。 | FR-23、AT-39 |
-| T-05 | 每位學生每學期最多 18 學分，兩個入口執行同一限制。 | FR-23、AT-39、AT-44 |
-| T-06 | 教師可查授課班別的已選學生名單。 | FR-25、AT-42 |
-| T-07 | 教師可新增與更新個別學生的成績。 | FR-26、AT-43 |
-| T-08 | 系統以 PostgreSQL 保存資料。 | FR-22、AT-13、AT-44 |
-| T-09 | 選課 Agent 採用 LangGraph。 | FR-22、AT-37、AT-38 |
-| T-10 | 語言模型使用 Llama 3.2 3B。 | FR-22、AT-37 |
-| T-11 | Agent 經指定工具與 PostgreSQL 互動。 | FR-09、FR-22、AT-10、AT-38 |
-| T-12 | 學生與教師具有獨立權限。 | FR-27、AT-42、AT-43 |
-| T-13 | Web 與助理共用資料庫，選課狀態一致。 | FR-05、FR-06、FR-22、AT-45 |
+| 英文加退選 | LangGraph `english_registration`：Llama 3.2 3B 輸出結構化意圖，後端以規則檢查明確性、否定、問句、條件、引述、多門課與他人操作，再經 `add_course`／`drop_course` 工具寫入。 | [english_agent.py](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/backend/app/english_agent.py) |
+| 中文查詢與研究路徑 | 移除 Gemini。完整固定句型直接查資料庫，其餘問題由同一個 Llama 3.2 3B 產生查詢計畫，學生原句沒有的系所、學校、星期、門數與時段一律刪除後才執行。 | [chat.py](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/backend/app/chat.py) |
+| 語音 | 移除 Gemini。API 容器內以 faster-whisper（`base`、int8）轉寫，OpenCC 轉臺灣繁體，映像離線執行。 | [voice.py](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/backend/app/voice.py) |
+| 模型證據 | 每則助理回覆、API 的 `agent.llm` 與日誌附模型伺服器回報的模型名稱、token 數與耗時；未呼叫模型時標示本機規則或 `CHAT_STUB`。 | [README](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/README.md#確認助理真的呼叫-llama而非固定規則) |
+| 18 學分與衝堂 | 共用交易服務檢查 `min(個人上限, 18)` 與時段重疊；migration `0006` 封頂既有上限並留稽核。 | [registration.py](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/backend/app/registration.py) · [0006](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/backend/alembic/versions/0006_instructor_grades_gmail.py) |
+| 教師名單與成績 | `INSTRUCTOR` 角色、「我的授課」頁、`grades` 表、成績稽核。 | [instructor.py](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/backend/app/instructor.py) |
+| Email | 選課確認信、課表與分發結果皆由 Outbox Worker 寄出。預設 Gmail SMTP 應用程式密碼，可切換 Gmail API；`verify-email` 檢查設定，`retry-failed` 重寄失敗信。 | [worker.py](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/backend/app/worker.py) · [gmail.py](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/backend/app/gmail.py) |
+| 部署 | Windows 主機的 Ollama 可由 VM 以 `LLAMA_BASE_URL` 連線；`deploy.sh` 最後檢查 Llama 與 Gmail 設定，失敗只警告。 | [README](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/README.md) |
 
 ## 2. 角色與主要畫面
 
@@ -101,26 +116,28 @@ FastAPI 由 Session 解析 `student_id` 或 `instructor_id`。教師操作以 `s
 | FR-06 | P0 | 顯示同一資料庫的本人課表及選課狀態。正式總學分只計 `ENROLLED`，待分發班別獨立標示。兩個介面可立即查得已提交的資料。 |
 | FR-07 | P1 | 管理員可維護學期、班別、先修、容量及時段，管理異動留稽核。 |
 | FR-08 | P1 | 分發公布產生摘要，包含錄取、未錄取原因及結果頁連結。錄取確認信另遵循 FR-24。 |
-| FR-09 | P0 | 提供助理的選課規則、公開班別及本人選課查詢。查詢透過指定工具，具體班別提供可追溯連結。 |
+| FR-09 | P0 | 提供助理的選課規則、公開班別及本人選課查詢。查詢透過指定工具，具體班別提供可追溯連結。`v3.0.1` 的中文自由問句由 Llama 3.2 3B 產生查詢計畫，欄位經原句核對後才執行。 |
 | FR-10 | P2 | 手動收藏、儲存多份試排課表並比較方案。 |
 | FR-11 | P2 | 候補、授權碼加選及志願排序。 |
 | FR-12 | P1 | 按研究方向或系所推薦當期班別，說明課程與主題的關聯、資格、時段及研究延伸。 |
 | FR-13 | P1 | Agent 按條件自動試排，學生可刪減項目並一次確認。系統按學期階段提交初選登記或正式加選。 |
 | FR-14 | P1 | 維護 §1.1 三校電資課程、主題、同名辨識與官方來源，示範班別標示「模擬選課」。 |
 | FR-15 | P1 | 已登入學生可用中文明確指令加選唯一班別。遇同名或部分命中則讓學生選班。初選期間提供確認登記的入口。 |
-| FR-16 | P1 | 保留華語錄音、音檔上傳、轉寫修正與可選朗讀，共用中文助理查詢、加選和試排。 |
+| FR-16 | P1 | 保留華語錄音、音檔上傳、轉寫修正與可選朗讀，共用中文助理查詢、加選和試排。`v3.0.1` 以伺服器內的 faster-whisper 轉寫，錄音不傳到外部服務。 |
 | FR-17 | P1 | 學生可手動寄出包含正式及待分發時段的課表快照。管理員可查看寄送進度。 |
 | FR-18 | P1 | 保留預設 115-1 單學期初選與可切換的加退選示範情境。 |
 | FR-19 | P1 | 支援依系所取得建議、「我剛剛選了什麼？」與依星期、系所查剩餘名額等固定問法。 |
 | FR-20 | P1 | 依 §12 提供 16 條研究修課路徑、已修課對照、當期開課狀態與未來進程，可接續試排。 |
 | FR-21 | P0 | 學生能以不同的英文自然語句要求正式加選或退選。確認唯一班別、意圖明確且規則通過後，從聊天流程完成寫入並回操作結果。 |
-| FR-22 | P0 | 英文助理以 Llama 3.2 3B 解析意圖、LangGraph 編排與指定工具處理。工具使用登入身分及既有 FastAPI 交易服務，與 Web 共用 PostgreSQL。 |
+| FR-22 | P0 | 英文助理以 Llama 3.2 3B 解析意圖、LangGraph 編排與指定工具處理。工具使用登入身分及既有 FastAPI 交易服務，與 Web 共用 PostgreSQL。回應與日誌附模型伺服器回報的模型名稱、token 數與耗時，可查證確實呼叫模型。 |
 | FR-23 | P0 | 所有正式加選路徑共用 §4.2。任何已選時段重疊或加選後超過 18 學分都須拒絕。本專題保留較低的個別學分上限。 |
-| FR-24 | P0 | 正式錄取或加選交易提交時建立本人確認信事件。Worker 透過 Gmail API 寄送，並保留寄送狀態以供驗收。 |
+| FR-24 | P0 | 正式錄取或加選交易提交時建立本人確認信事件。Worker 以 Gmail 寄送並保留寄送狀態與訊息 ID 以供驗收。`v3.0.1` 預設 Gmail SMTP 應用程式密碼，`GMAIL_TRANSPORT=api` 時改用 Gmail API（§7.2）。 |
 | FR-25 | P0 | 教師按學期看本人授課班別及每班 `ENROLLED` 學生。名單依課號、班別、學號辨識，涵蓋姓名及目前成績。 |
 | FR-26 | P0 | 教師在授課班別為個別正式選課學生登錄或修改成績，寫入成績與稽核。 |
 | FR-27 | P0 | 新增 `INSTRUCTOR` 登入角色並連結既有教師主檔。後端分別檢查角色、班別的教師與該生選課狀態。 |
 | FR-28 | P1 | 保留 115-1 初選時段設定、區網 HTTP 同源操作、HTTPS 麥克風與音檔上傳等 `v2.1.0` 交付功能。 |
+| FR-29 | P1 | 所有語言模型與語音辨識在本機或自管伺服器執行，不使用雲端語言模型：文字用 Llama 3.2 3B，語音用 faster-whisper（`v3.0.1` 新增）。 |
+| FR-30 | P1 | 管理員可檢查寄信設定、寄測試信，並在修正設定後重寄失敗的通知（`verify-email`、`retry-failed`，`v3.0.1` 新增）。 |
 
 ## 4. 選課流程與商業規則
 
@@ -203,7 +220,7 @@ erDiagram
 
 ### 5.2 資料字典
 
-`id` 採 UUID，事件時間採 `timestamptz`。現行版本的 Alembic 至 `0005`。`0001` 建立核心，`0002` 增加推薦，`0003–0004` 擴充三校及主學期，`0005` 更新示範教師名稱。下表含此次新增的角色、成績與確認信欄位。[資料模型](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/backend/app/models.py)
+`id` 採 UUID，事件時間採 `timestamptz`。`v3.0.1` 的 Alembic 至 `0006`。`0001` 建立核心，`0002` 增加推薦，`0003–0004` 擴充三校及主學期，`0005` 更新示範教師名稱，`0006_instructor_grades_gmail` 新增教師角色與帳號關聯、成績表、18 學分約束、寄送訊息 ID 與 `v_credit_limit_overloads`。下表含本版新增的角色、成績與確認信欄位。[資料模型](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/backend/app/models.py)
 
 | 資料表 | 主要欄位與鍵 | 資料用途 |
 |---|---|---|
@@ -224,7 +241,7 @@ erDiagram
 | `selection_plan_items` | `plan_id, term_id, section_id, course_id, position`。`(plan_id, section_id)` 為 PK，`(plan_id, position)` 及 `(plan_id, course_id)` 皆唯一。 | 限定可確認的班別與原試排順序，供選課稽核追查。 |
 | `audit_events` | `id, actor_user_id FK, term_id FK, action, target_type, target_id, occurred_at, payload`。 | 留存選課、操作來源、分發、管理與成績異動。批次選課記 `plan_id`。 |
 | `idempotency_keys` | `(student_id, term_id, request_key)` 為 PK，含 `request_fingerprint, response_status, response_body, created_at`。 | 同一鍵送出相同操作可重播成功結果。Web、助理、草案確認與寄課表沿用此機制。 |
-| `notification_outbox` | `id, event_key UNIQUE, term_id FK, recipient_user_id FK, type, payload, status, attempt_count, next_attempt_at, lease_until, claim_token, sent_at, last_error`。新增可空的 `provider_message_id`。 | 寄送佇列。增加 `REGISTRATION_CONFIRMATION` 與 Gmail API 寄送證據，保留 `TIMETABLE` 及 `ALLOCATION`。 |
+| `notification_outbox` | `id, event_key UNIQUE, term_id FK, recipient_user_id FK, type, payload, status, attempt_count, next_attempt_at, lease_until, claim_token, sent_at, last_error`。新增可空的 `provider_message_id`。 | 寄送佇列。增加 `REGISTRATION_CONFIRMATION` 與寄送證據（Gmail API 訊息 ID，或 SMTP 寄出時以 `smtp:` 開頭的 Message-ID），保留 `TIMETABLE` 及 `ALLOCATION`。 |
 | `grades`（新增） | `enrollment_id PK/FK → enrollments.id`，`score numeric(5,2) NOT NULL`，`CHECK (score BETWEEN 0 AND 100)`，`graded_by_user_id FK → users.id`、`created_at`、`updated_at`。 | 每筆修課紀錄最多一筆現行成績，異動歷史由 `audit_events` 留存。 |
 
 ### 5.3 約束、索引及查詢
@@ -264,7 +281,7 @@ erDiagram
 - **授課關係。** `instructors.user_id` 是允許空值的唯一 FK。未啟用登入的既有示範教師仍可作為班別教師。教師登入需有 `INSTRUCTOR` 角色、啟用帳號與對應教師資料。以系統資料核對授課班別及學期。
 - **名單查詢。** 以 `sections`、`enrollments` 與 `students` 查本人授課班別的 `ENROLLED` 學生，並由 `LEFT JOIN grades` 帶入分數。尚未評分的欄位為空值，零分照常顯示。可沿用已有的有效選課班別索引。排序採學號，並回傳供更新使用的 `enrollment_id`。
 - **成績規格。** 此專題採 0–100 分，最多兩位小數。每筆修課紀錄保有一筆目前成績，增修使用該生的 `enrollment_id`。在交易中核對授課關係及有效選課，鎖住選課資料列後寫入分數與異動稽核。稽核保存教師帳號、時間、課程範圍及異動前後分數。相同值重送可回原成績。課表退選後保留原成績紀錄，名單只列有效選課。重加同學期同班沿用相同修課 ID，授課教師可再更新該分數。
-- **資料升級。** 新的 Alembic migration 接在 `0005` 後，加入教師帳號關聯、成績表、18 學分約束與必要通知欄位。把既有大於 18 的 `credit_limit` 改為 18，更新種子。舊學期的課表、班別和寄信紀錄照原 ID 保留。若既有有效選課總學分已超限，維護查詢列出該學生學期，可退選並按 §4.2 拒絕後續超修。
+- **資料升級。** migration `0006_instructor_grades_gmail` 接在 `0005` 後，加入教師帳號關聯、成績表、18 學分約束與寄送訊息 ID 欄位。把既有大於 18 的 `credit_limit` 改為 18 並寫稽核 `CREDIT_LIMIT_CAPPED`，更新種子。舊學期的課表、班別和寄信紀錄照原 ID 保留。若既有有效選課總學分已超限，`v_credit_limit_overloads` 與 `python -m app.manage credit-overloads` 列出該學生學期，可退選並按 §4.2 拒絕後續超修。降版時若已有成績或教師帳號則拒絕執行。
 
 ## 6. REST API 與介面契約
 
@@ -295,13 +312,15 @@ erDiagram
 | `POST /admin/terms/{term_id}/publish` | 管理員 | 驗證學期、選課時段及班別資料，公開課程目錄。 |
 | `POST /admin/terms/{term_id}/allocation` | 管理員 | 分發並公布。回傳 `run_id, published_at, accepted_count, rejected_count`。既有批次回相同結果。 |
 | `GET /admin/terms/{term_id}/notifications` | 管理員 | 依學期分頁查通知類型、狀態、嘗試次數、預計重試、寄出時間與錯誤代碼。 |
-| `POST /chat` | 學生 | 接收 `message`、選填 `term_id, section_id, track_code`。回 `mode, answer, sources, as_of, request_id`。推薦可附 `recommendation.roadmap`。加退選須附 `Idempotency-Key`，成功回 `action` 及對應狀態。 |
-| `POST /chat/voice` | 學生 | P1 既有入口。上傳 `audio`，可選填 `term_id, track_code`，附 `Idempotency-Key`。回文字助理結果及轉寫，見 §7.6。 |
+| `POST /chat` | 學生 | 接收 `message`、選填 `term_id, section_id, track_code`。回 `mode, answer, sources, as_of, request_id, agent`。推薦可附 `recommendation.roadmap`。加退選須附 `Idempotency-Key`，成功回 `action` 及對應狀態。`agent` 含 `graph, model, intent, tools, llm`，`llm` 為模型伺服器回報的 token 數與耗時。 |
+| `POST /chat/voice` | 學生 | P1 既有入口。上傳 `audio`，可選填 `term_id, track_code`，附 `Idempotency-Key`。回文字助理結果及轉寫，見 §7.6。轉寫成功但模型逾時時回 `503 CHAT_UNAVAILABLE` 並保留 `transcript`。 |
 | `GET /instructor/terms/{term_id}/sections` | 教師 | 新增。回本人在指定學期的授課班別與有效選課人數。 |
 | `GET /instructor/terms/{term_id}/sections/{section_id}/roster` | 教師 | 新增。回本班 `enrollment_id, student_no, student_name, score, graded_at`。未登分的分數為 `null`。 |
 | `PUT /instructor/terms/{term_id}/sections/{section_id}/roster/{enrollment_id}/grade` | 教師 | 新增。以 `score` 新增或更新個別成績，成功回 `200`、分數與時間。後端核對教師、班別、學期及正式選課。 |
 
 選課窗口外的登記、取消、加退選及草案確認回 `409 REGISTRATION_CLOSED`。學期已公開且學生具修課資格時，可隨時寄送本人課表。初選截止前執行分發回 `409 ALLOCATION_NOT_READY`。已公開班別未開放選課時回 `409 SECTION_UNAVAILABLE`，識別碼不存在或跨學期時回 `404`。錄取失敗碼沿用 §4.2。衝堂的 `details` 可含衝突班別，超學分可含計算後總學分與上限。必要的 `Idempotency-Key` 缺少、訊息過長或參數無效時回 `422`。
+
+模型逾時、連不到或輸出無法驗證時回 `503 CHAT_UNAVAILABLE`，`details.reason_code` 為 `LLAMA_NOT_CONFIGURED`、`LLAMA_UNREACHABLE`、`LLAMA_TIMEOUT`、`LLAMA_MODEL_UNAVAILABLE`、`LLAMA_INVALID_OUTPUT` 等固定代碼，選課資料不變。
 
 英文助理成功加選的 `mode` 為 `add_course`，退選為 `drop_course`。`action` 回 `status`（`ENROLLED` 或 `DROPPED`）、`term_id, section_id, enrollment_id, total_credits, remaining, submitted_at`。沿用既有校系、課名及班號資訊。正式加選回通知 ID。釐清時回 `mode=clarify` 與候選或補問資訊，選定後重驗同一操作。
 
@@ -309,11 +328,13 @@ erDiagram
 
 ## 7. 選課助理與 Email
 
-課程指定的英文流程使用 Llama 3.2 3B。LangGraph 將解讀結果交給 FastAPI 的指定工具。Web 按鈕與助理工具都由登入身分進入同一套選課交易。教師查名單、寫成績同樣使用此 PostgreSQL 的正式選課資料。既有 Gemini 音訊轉寫與中文推薦可作為 P1 入口運作。
+課程指定的英文流程使用 Llama 3.2 3B。LangGraph 將解讀結果交給 FastAPI 的指定工具。Web 按鈕與助理工具都由登入身分進入同一套選課交易。教師查名單、寫成績同樣使用此 PostgreSQL 的正式選課資料。`v3.0.1` 移除 Gemini：中文查詢計畫改用同一個 Llama 3.2 3B，語音轉寫改用伺服器內的 faster-whisper。
 
 ```mermaid
 flowchart TD
     Chat["英文選課助理"] --> Model["LangGraph 與 Llama 3.2 3B"]
+    ChatZh["中文問答與研究路徑"] --> Model
+    Voice["語音（faster-whisper）"] --> ChatZh
     Model --> Tools["驗證意圖、班別及登入身分"]
     Tools --> Service["FastAPI 選課交易"]
     Web["學生網頁"] --> Service
@@ -321,7 +342,7 @@ flowchart TD
     Teacher["教師網頁"] --> Grades["授課權限與成績服務"]
     Grades --> Db
     Db --> Worker["通知 Worker"]
-    Worker --> Gmail["Gmail API"]
+    Worker --> Gmail["Gmail（預設 SMTP 應用程式密碼，可選 Gmail API）"]
 ```
 
 ### 7.1 Agent、Llama 與指定工具
@@ -330,6 +351,9 @@ flowchart TD
 2. **核對上下文。** 寫入意圖須來自使用者明確要求，並限定本人與選定學期。使用後端班別匹配取得唯一且可操作的 `section_id`。回覆問題、否定、引用、同名多班、條件句及未辨識內容時，採查詢或釐清。畫面選擇候選後，後端重查它屬於原指令和同一學期。
 3. **呼叫指定工具。** 後端從允許的工具清單取用資料或提交，模型傳入的欄位無法指定他人帳號或改寫資料庫查詢內容。課表跟正式操作由服務載入，公開查課使用參數化查詢及公開 View 權限。教師名單與成績存取限定教師 API。
 4. **回覆與失敗。** 以工具結果組合英文確認、班別、選課狀態、總學分、原因與連結。模型逾時、不可用或無效輸出時，保留既有狀態，回明確錯誤及網頁加退選入口。自動化測試可替換模型回應，AT-37 使用已部署的 Llama 3.2 3B 進行實機驗收。
+5. **`v3.0.1` 的明確性判定。** 是否為「本人現在要求加選或退選」由 Llama 的 `explicit_request` 或常見祈使句規則判定，因此 “yo can u sign me up for CS101 A pls” 這類口語也可寫入；否定、問句、條件、引述、一次兩門與替他人操作一律不寫入。模型輸出的課號必須出現在學生原句中。
+6. **中文查詢計畫（`v3.0.1`）。** LangGraph `course_assistant` 先以固定句型處理完整明確的問題，其餘交給 Llama 3.2 3B 產生 `tool, keyword, department, school_code, weekday, has_seats, sort, topic, track_code, target_count, available_times`。程式逐欄核對學生原句：沒說出的系所、學校、星期、門數與時段刪除，型別不符的欄位捨棄，查他人資料與代為退選仍由本機防護攔下。只提到研究方向、沒有加退選動詞的英文訊息也走此流程。
+7. **可查證。** 每則回覆的 `agent.llm` 與 API 日誌記錄模型伺服器回報的模型名稱、提示與輸出 token 數及耗時，不記錄學生訊息。`python -m app.verify_llama` 與 `python -m app.verify_assistant` 以真實模型探測並比對 PostgreSQL。
 
 | 可用工具或路徑 | 資料來源與輸入 | 預期行為 |
 |---|---|---|
@@ -340,25 +364,28 @@ flowchart TD
 | `drop_course` | 本人有效選課定位出的學期、班別及冪等鍵 | 使用 §5.4 共同交易轉成 `DROPPED`，釋出名額並更新總學分。 |
 | 試排與建議 | 公開班別、學生本人資格與主題標籤 | 延續 §7.3–7.4 與 §7.7 的推薦、草案與確認。 |
 
-### 7.2 Gmail API 確認信與既有通知
+### 7.2 Gmail 確認信與既有通知
 
 本專題將「完成選課」定義為 PostgreSQL 提交成功、課程成為 `ENROLLED`。即時單筆加選一筆操作寄一封，批次確認一個成功草案寄一封。沿用初選時，於分發公布後對有錄取的學生依批次寄一封。待分發、純查詢、試排草案、退選及失敗請求維持零筆選課確認信。
 
 | 通知事件 | 觸發與收件人 | 寄送與內容 |
 |---|---|---|
-| `REGISTRATION_CONFIRMATION`（P0 新增） | Web、Agent 單筆加選、批次加選或初選正式錄取。收件人取本人帳號的已設定信箱。 | Worker 呼叫 Gmail API。信內列學期、課程代碼、班號、學分、總學分、提交時間和課表入口。 |
-| `TIMETABLE`（P1 既有） | 本人在「我的課表」按「寄送課表」。 | 透過原本的 SMTP Worker 寄出當下快照，含正式、待分發時段、教室及學分。 |
-| `ALLOCATION`（P1 既有） | 初選分發公布後，對有分發結果的學生建立摘要。 | 透過原本的 SMTP Worker 列錄取、未錄取與原因，以及結果入口。 |
+| `REGISTRATION_CONFIRMATION`（P0 新增） | Web、Agent 單筆加選、批次加選或初選正式錄取。收件人取本人帳號的已設定信箱。 | Worker 經 Gmail 寄出。信內列學期、課程代碼、班號、學分、總學分、提交時間（臺北時間）和課表入口。 |
+| `TIMETABLE`（P1 既有） | 本人在「我的課表」按「寄送課表」。 | 與確認信相同的寄送方式，寄出當下快照，含正式、待分發時段、教室及學分。 |
+| `ALLOCATION`（P1 既有） | 初選分發公布後，對有分發結果的學生建立摘要。 | 與確認信相同的寄送方式，列錄取、未錄取與原因，以及結果入口。 |
 
 - **同一交易與去重。** 將正式選課、稽核、成功回應的冪等鍵與確認信 Outbox 事件一起提交。確認信 `event_key` 依學生、學期與本次成功操作或分發批次產生。相同請求重送時重播原結果，沿用同一筆事件。同一班退選後以新操作再加選，可建立新的確認事件。
-- **實際寄送。** Worker 沿用 `FOR UPDATE SKIP LOCKED`、租約與 claim token 取得工作。使用已授權寄件帳號、OAuth 與 `gmail.send` 權限，組裝郵件並呼叫 `users.messages.send`。Gmail API 成功回覆後保存 Google 回傳的訊息 ID、送出時間及 `SENT` 狀態。測試以虛構學生帳號配可收信的測試 Gmail 位址。[Gmail API 寄信](https://developers.google.com/workspace/gmail/api/guides/sending) · [方法與 OAuth 權限](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send)
-- **重試與展示。** Worker 保留 `PENDING`、`PROCESSING`、`SENT`、`FAILED`。暫時性失敗沿用既有重試間隔與次數，永久性授權錯誤記錄原因。學生介面依交易結果顯示「選課成功，確認信已排入寄送」，教務介面查實際寄送狀態。測試需涵蓋重送與失敗回滾。外部請求若在 Gmail 已受理後遺失回應，仍可能重複投遞。課堂 Gmail 驗收需核對實際收件與事件紀錄。
+- **實際寄送。** Worker 沿用 `FOR UPDATE SKIP LOCKED`、租約與 claim token 取得工作，所有信種使用同一寄送方式並保存訊息 ID、送出時間及 `SENT` 狀態。測試以虛構學生帳號配可收信的測試 Gmail 位址（`manage set-email`）。
+  - **預設：Gmail SMTP 應用程式密碼**（`GMAIL_TRANSPORT=smtp`）。連線 `smtp.gmail.com:587` 先 STARTTLS 再登入（或 465 SSL），不降級為明文。訊息 ID 以 `smtp:` 開頭。[Gmail 應用程式密碼](https://support.google.com/accounts/answer/185833)
+  - **選用：Gmail API**（`GMAIL_TRANSPORT=api`）。使用已授權寄件帳號、OAuth refresh token 與 `gmail.send` 權限，組裝郵件並呼叫 `users.messages.send`，保存 Google 回傳的訊息 ID。[Gmail API 寄信](https://developers.google.com/workspace/gmail/api/guides/sending) · [方法與 OAuth 權限](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send)
+  - **與教師規格的差異。** `Database.pdf` 的 Email Service 為 Gmail API。實作曾全部改用 Gmail API，但個人 Gmail 帳號需建立 Google Cloud OAuth 用戶端、維護測試使用者，且測試狀態的 refresh token 約 7 天失效，因此 `v3.0.1` 依使用者決定預設改回應用程式密碼。驗收要求 Gmail API 時改設 `GMAIL_TRANSPORT=api` 並依 README 取得 OAuth 憑證，兩條路徑都有自動化測試。
+- **重試與展示。** Worker 保留 `PENDING`、`PROCESSING`、`SENT`、`FAILED`。暫時性失敗（連線、逾時、5xx）沿用既有重試間隔與次數；帳密、授權或設定錯誤（`SMTP_AUTH_FAILED`、`SMTP_NOT_CONFIGURED`、`GMAIL_*`）直接記為 `FAILED`，只存固定代碼並在管理頁顯示處理提示，修正後以 `python -m app.manage retry-failed` 重新排入。`python -m app.manage verify-email [--send-to]` 檢查設定並寄測試信，部署最後也執行同一檢查。學生介面依交易結果顯示「選課成功，確認信已排入寄送」，教務介面查實際寄送狀態。測試需涵蓋重送與失敗回滾。外部請求若在 Gmail 已受理後遺失回應，仍可能重複投遞。課堂 Gmail 驗收需核對實際收件與事件紀錄。
 
 ### 7.3 依研究方向或系所推薦課程與試排
 
 FR-20 的分階段修課諮詢依 §7.7 回傳路徑。這類諮詢在收到試排或代選請求時，才從符合下列條件的班別建立草案。
 
-1. **解析需求。** 研究方向模式以既有別名或驗收部署的文字模型解析主題、關鍵字、目標門數及可上課時段。門數預設 3，接受 1–5 門。學生可只指定系所，例如「我是電子系學生，給我修課建議」，此時從該系的公開班別取候選。學期優先採畫面選擇或預設 115-1，班別所有時段均須符合學生提出的時段限制。學生亦可指定參考學校。
+1. **解析需求。** 研究方向模式以既有別名或 Llama 3.2 3B 查詢計畫（§7.1 第 6 點）解析主題、關鍵字、目標門數及可上課時段。門數預設 3，接受 1–5 門。學生可只指定系所，例如「我是電子系學生，給我修課建議」，此時從該系的公開班別取候選。學期優先採畫面選擇或預設 115-1，班別所有時段均須符合學生提出的時段限制。學生亦可指定參考學校。
 2. **查詢並排序。** 以參數化 SQL 從該學期已公開班別找候選。版本化主題對照表將「大語言模型」「大型語言模型」「LLM」對應至 `llm`，並以 `nlp`、`retrieval`、`deep_learning`、`ml_systems` 為關聯主題。每班依直接標籤命中 6 分、任一關聯標籤命中 3 分、課名或大綱任一關鍵字命中 1 分加總。已知主題使用其共用關鍵字，並納入學生另行指定的關鍵字。只保留正分候選，按分數降序，同分按課程代碼、班號、班別 ID 升序，取前 20 筆。未登錄主題可用關鍵字查課名或大綱，查無資料時提示放寬條件或換學期。
 3. **試排及原因。** 後端依排序逐一挑班，對照個人課表、先修紀錄、學分上限、時段限制與本方案已挑班別，直到達到目標門數或候選用完。即時加選另檢查最新名額。同課異班只挑一班。初選將該生原有 `PENDING` 登記一併納入試排，用來避免重複、衝堂或超修的登記組合。標示相關但未選入的課程及可判定的原因，如衝堂、額滿、先修未過。剩餘門數不足時回傳目前可行組合與原因。
 4. **前端顯示。** 建議卡顯示班別連結、課名、班號、推薦證據、學分、所有時段、教室、名額、先修條件及資格。試排區顯示原有正式選課、初選時已有的待分發登記、建議班別及預估總學分。條件合格才建立草案。其他情況顯示可查課程、適用時程與未建立草案的原因。班別顯示學校與官方課程來源。
@@ -404,7 +431,7 @@ P0 的英文對話可在 `ADD_DROP` 階段透過 FR-21–22 工具正式加退�
 | “Can I take CS101?” | 回資格、時段或候選，維持課表。 |
 | “Drop the course.”／“Don't drop CS101.” | 依情況要求指定課程或回覆目前課表狀態。 |
 
-P1 保留 FR-15–16 的中文與語音入口，依相同學期與後端選課規則運作。
+P1 保留 FR-15–16 的中文與語音入口，依相同學期與後端選課規則運作。`v3.0.1` 的中文單門指令解析也接受語音轉寫常見的「我想要加選、CS101 A 班」寫法（動詞後的頓號、班號前的空白）。
 
 學生在助理選好學期後，可打字或說「我要加選資料庫設計」。在即時加退選期間，助理找到唯一一班且學生符合規則時，當次請求完成加選並更新「我的課表」。初選期間由學生確認登記。
 
@@ -431,12 +458,12 @@ P1 保留 FR-15–16 的中文與語音入口，依相同學期與後端選課�
 |---|---|
 | 麥克風介面 | 助理提供「開始錄音」、「停止並送出」與「取消」。錄音時顯示圖示與秒數。只有送出的最終錄音進入辨識。送出時也支援鍵盤操作。 |
 | 瀏覽器錄音 | React 在受信任的 HTTPS 或 localhost 透過 `getUserMedia` 與 `MediaRecorder` 擷取音訊。用 `MediaRecorder.isTypeSupported()` 選用 WebM/Opus、MP4/AAC 或 Ogg/Opus。錄滿 20 秒時停止收音，等學生送出或取消。也可從裝置選擇 WebM、M4A、MP4、Ogg、WAV 或 MP3 音檔，區網 HTTP 同樣可用。 |
-| 上傳與轉寫 | 每次至多 20 秒、5 MiB。FastAPI 驗證後以 FFmpeg 轉成 16 kHz 單聲道 WAV，送至支援音訊輸入的 `GEMINI_AUDIO_MODEL`，以繁體中文轉寫並保留英文縮寫、課號及班號。轉寫上限 20 秒，整次語音請求上限 30 秒。 |
+| 上傳與轉寫 | 每次至多 20 秒、5 MiB。FastAPI 驗證後以 FFmpeg 轉成 16 kHz 單聲道，於 API 程序內以 faster-whisper（預設 `base`、int8、2 執行緒、VAD）轉寫。提示詞帶入選課常用語以保留課號及班號，輸出以 OpenCC 轉臺灣繁體。模型在建置映像時下載，執行時離線（`HF_HUB_OFFLINE=1`）。轉寫上限 20 秒，整次語音請求上限 30 秒。 |
 | 共享指令流程 | 顯示辨識到的指令或問題。初選期間顯示可確認登記的班別。加退選期間清楚的單門加選轉入 §7.5。辨識後可把文字放回輸入框修正。語音試排可帶入前一個研究方向。 |
 | 朗讀回覆 | 可按「朗讀回覆」。瀏覽器支援 `SpeechSynthesis` 時，以 `zh-TW` 朗讀加選成功訊息、候選或失敗原因。畫面始終顯示完整文字結果。 |
-| 權限及故障 | 麥克風未授權或瀏覽器不支援時，可選擇音檔或使用文字輸入。靜音或不清楚回 `422 VOICE_UNCLEAR`。檔案太大回 `413`，不支援格式回 `415`，辨識服務異常回 `503 VOICE_UNAVAILABLE`。 |
+| 權限及故障 | 麥克風未授權或瀏覽器不支援時，可選擇音檔或使用文字輸入。靜音或不清楚回 `422 VOICE_UNCLEAR`（平均信心過低、文字重複或只重述提示詞也算不清楚）。檔案太大回 `413`，不支援格式回 `415`，辨識模型載入失敗回 `503 VOICE_UNAVAILABLE`。 |
 
-錄音介面顯示錄音會送往 Gemini 辨識。轉寫回傳 `transcript` 與清晰、含糊或靜音狀態，保留能辨識到的課名及班號。前端在結束錄音或離開頁面時釋放麥克風。系統處理完畢即清除音訊與轉寫暫存。可重播的成功回應保存選課結果及辨識到的加選指令所對應的標準化校系、課名與班號。
+錄音介面顯示錄音在本系統伺服器以 Whisper 轉寫，不傳到外部服務。轉寫回傳 `transcript` 與清晰、含糊或靜音狀態，保留能辨識到的課名及班號。前端在結束錄音或離開頁面時釋放麥克風。系統處理完畢即清除音訊與轉寫暫存。可重播的成功回應保存選課結果及辨識到的加選指令所對應的標準化校系、課名與班號。
 
 ### 7.7 研究方向與分階段修課建議
 
@@ -464,19 +491,20 @@ P1 保留 FR-15–16 的中文與語音入口，依相同學期與後端選課�
 | Frontend | 保留 React、TypeScript、Vite 與 Nginx。使用同源 `/api/v1`。學生助理顯示英文指令結果與衝突原因，教師端顯示授課名單、成績輸入、更新成功與表單驗證。 |
 | Backend | FastAPI、Pydantic、SQLAlchemy 2.x 與 Alembic。Web 和 Agent 共用驗證、交易、稽核及通知服務，教師 API 單獨檢查角色與授課關係。 |
 | Database | 沿用 PostgreSQL 16、`course_db` volume 與 migration、應用程式、公開查詢權限。應用與公開查詢的帳號分開，連至同一 PostgreSQL 資料庫。 |
-| Agent 與模型 | 驗收部署以 LangGraph 編排工具，需經模型處理的文字意圖及對話使用 Llama 3.2 3B。使用本機或遠端模型服務，README 記錄模型版本、端點設定及驗證方式。Gemini 可繼續用於既有 P1 語音轉寫，舊推薦的 Gemini 路徑可作為選用設定。 |
-| Email | 選課確認信使用 Gmail API。保留既有 SMTP Worker 與 Mailpit 作為課表、摘要及開發回歸。開發測試可模擬 Gmail 回應，正式驗收依 AT-40 實寄。 |
+| Agent 與模型 | 驗收部署以 LangGraph 編排工具，需經模型處理的文字意圖及對話使用 Llama 3.2 3B。`v3.0.1` 以 Ollama 提供 `llama3.2:3b`（Compose `llm` profile，或 VM 經 `LLAMA_BASE_URL` 連到 Windows 主機的 Ollama），亦支援 OpenAI 相容端點。語音使用映像內的 faster-whisper。不使用 Gemini 或其他雲端模型。README 記錄模型版本、端點設定及驗證方式。 |
+| Email | 所有通知信由同一 Worker 經 Gmail 寄出：預設 Gmail SMTP 應用程式密碼，`GMAIL_TRANSPORT=api` 改用 Gmail API（§7.2）。未設定 Gmail 帳號時可寄到內附 Mailpit 預覽。開發測試模擬 SMTP 與 Gmail API 回應，正式驗收依 AT-40 實寄。 |
 | Authentication | 沿用 Argon2id、可撤銷的 Session 與 `HttpOnly`、`SameSite=Lax` Cookie。安全來源及 HTTPS 沿用 `APP_ORIGIN`、`APP_ALLOWED_ORIGINS` 與 `COOKIE_SECURE`。 |
-| Docker Compose | PostgreSQL 健康後執行一次性 migration，並啟動 API、前端與 Worker。HTTPS 可用既有服務設定。模型若另外部署，README 需提供服務準備與連線方式。 |
-| 設定與金鑰 | `.env.example` 提供模型服務位址、模型名稱、寄件帳號與 OAuth 欄位範例，沿用 115-1 初選、資料庫與 SMTP 設定。實際憑證以部署環境注入，程序日誌只記請求 ID、模型名稱、狀態與錯誤代碼。 |
-| 故障與效能 | 沿用 `/health/live`、`/health/ready` 與結構化日誌。模型服務不可用時 Web 仍可加退選。寄信失敗由 Worker 重試，已提交的選課可查。既有課程搜尋目標為 1,000 班、20 並行的暖機後 p95 ≤ 500 ms，量測報告應說明環境。 |
+| Docker Compose | PostgreSQL 健康後執行一次性 migration，並啟動 API、前端與 Worker。HTTPS 可用既有服務設定。`deploy.sh --llm` 啟動內附 Ollama 並下載模型；模型若另外部署（例如 Windows 主機），README 提供 `scripts/windows/setup-ollama.ps1` 與 `scripts/check-ollama.sh`。部署最後檢查 Llama 與 Gmail 設定，失敗只警告。 |
+| 設定與金鑰 | `.env.example` 提供 `LLAMA_*`（模型位址、名稱、逾時）、`WHISPER_*`（語音模型、執行緒、預載）、`GMAIL_TRANSPORT`、`SMTP_*`（Gmail 帳號與應用程式密碼）與選用的 `GMAIL_*` OAuth 欄位範例，沿用 115-1 初選與資料庫設定。實際憑證只放在不進 Git 的 `.env`，程序日誌只記請求 ID、模型名稱、token 數、狀態與錯誤代碼，不記密碼與學生訊息。 |
+| 故障與效能 | 沿用 `/health/live`、`/health/ready` 與結構化日誌。模型服務不可用時 Web 仍可加退選。實測 Llama 3.2 3B 每次 0.4–2.1 秒；faster-whisper `base` 每段 0.7–1.8 秒、程序約多用 450 MB 記憶體。寄信失敗由 Worker 重試，已提交的選課可查。既有課程搜尋目標為 1,000 班、20 並行的暖機後 p95 ≤ 500 ms，量測報告應說明環境。 |
 
 ### 8.1 部署、更新與區網使用
 
-- **可重現基準。** 取得 `v2.1.0` 後按 README 初始化，先檢查 migration 至 `0005`，再開發本版新增變更。從舊庫升級保留原有班別、登記、選課、分發、先修與通知。既有部署如只套用環境設定或 migration，可使用 `--skip-seed`。[CourseFlow 部署](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/README.md#L28-L69)
+- **可重現基準。** 取得 `v3.0.1` 後按 README 初始化，migration 至 `0006`。從 `v2.1.0` 升級保留原有班別、登記、選課、分發、先修與通知；`.env` 需刪除 `GEMINI_*`、設定 `LLAMA_BASE_URL` 與 Gmail 寄信，並重新建置映像（語音模型於建置時下載）。既有部署如只套用環境設定或 migration，可使用 `--skip-seed`。[CourseFlow 部署](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/README.md#docker-compose-啟動)
 - **初選日期及正式驗收學期。** `INITIAL_START_AT`、`INITIAL_END_AT` 同填帶時區的時間，並在允許時由部署程式修改。保持預設設定可展示 115-1 初選。正式加退選驗收使用隔離資料庫，將 `PUBLIC_INITIAL_TERM_ID` 設空，首次採 `--scenario add-drop`。若使用已有測試庫，先確認當下階段為 `ADD_DROP`。[初選設定](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/README.md#L67-L78) · [情境啟動](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/README.md#L163-L183)
-- **入口。** 預設 Web `8080`、API 文件 `8000/docs`、Mailpit `8025`。可用 `deploy.sh --https` 啟用預設 `8443` 的 HTTPS 入口。區網同源 HTTP 可使用文字聊天及上傳音檔。瀏覽器錄音使用 localhost 或受信任的 HTTPS。`APP_ORIGIN` 同時用於信件連結。[區網與 HTTPS](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/README.md#L93-L129)
+- **入口。** 預設 Web `8080`、API 文件 `8000/docs`、Mailpit 預覽信箱 `8025`。可用 `deploy.sh --https` 啟用預設 `8443` 的 HTTPS 入口。區網同源 HTTP 可使用文字聊天及上傳音檔。瀏覽器錄音使用 localhost 或受信任的 HTTPS。`APP_ORIGIN` 同時用於信件連結。[區網與 HTTPS](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/README.md#L93-L129)
 - **維持資料一致。** Compose 使用同一份資料庫 volume。驗收時分別以空資料庫與 `v2.1.0` 升級資料庫測試，重啟後再次核對原有選課與新成績。
+- **模型位址。** VM 透過 VMware NAT 連 Windows 主機的 Ollama 時，`LLAMA_BASE_URL` 填 Windows 的 VMnet8 位址（例如 `http://192.168.169.1:11434`），Windows 端以 `OLLAMA_HOST=0.0.0.0` 監聽並以防火牆只開放 VM 網段。
 
 ## 9. 驗收測試
 
@@ -496,8 +524,8 @@ API 與併發測試必須連接 PostgreSQL。使用固定測試時間、學期�
 | AT-08 | 先修未過時加選，退選釋出一席後由另一位合格學生加選，管理員嘗試把容量降到已選人數以下。 | 分別得到 `PREREQUISITE_MISSING`、有效人數先減後增，以及 `CAPACITY_BELOW_ENROLLED`。 |
 | AT-09 | 加退選成功後模擬網路斷線，送出相同鍵值。另以同一鍵送不同班別。 | 原請求回原狀態碼與資料，選課異動及稽核各只執行一次。異指紋回 `409 IDEMPOTENCY_KEY_REUSED`。 |
 | AT-10 | 問選課規則、自然語言查名額、查本人、查他人課表。核對公開查詢帳號權限。 | 正確回覆並附適當來源。拒絕他人資料。公開查詢帳號只可讀取指定 View。 |
-| AT-11 | 用驗收部署的 Llama 查課及檢核工具結果，另測未設定、逾時或服務不可用。選用 Gemini 的推薦與語音另按各自設定回歸。 | 查課結果可對照 PostgreSQL。模型出錯時顯示原因及網頁入口，Web 可正常操作。 |
-| AT-12 | 按「寄送課表」，模擬 SMTP 拒絕連線再恢復。 | API 先回 `201`。Outbox 進入重試，恢復後 Mailpit 收到課表信，管理頁顯示 `SENT` 與嘗試次數。 |
+| AT-11 | 用驗收部署的 Llama 查課及檢核工具結果（中文查詢計畫以 `verify_assistant` 比對 PostgreSQL），另測未設定、逾時或服務不可用。語音以本機 faster-whisper 回歸。 | 查課結果可對照 PostgreSQL。模型出錯時顯示原因及網頁入口，Web 可正常操作。 |
+| AT-12 | 按「寄送課表」，模擬 SMTP 拒絕連線再恢復。 | API 先回 `201`。Outbox 以 `SMTP_UNREACHABLE` 進入重試，恢復後收件匣（Mailpit 預覽或 Gmail）收到課表信，管理頁顯示 `SENT`、嘗試次數與訊息 ID。 |
 | AT-13 | 在全新環境依 README 啟動 Compose、執行 seed，再以相同設定重啟。 | migration 執行成功，核心情境可操作，既有選課資料由 volume 保留。 |
 | AT-14 | 在即時加退選環境用「大語言模型」及「LLM」各查一次，再測試無關主題，以及未開放、額滿、衝堂、缺先修及超學分的班別。 | 同義詞查得一致排序結果。推薦與研究延伸皆對應資料庫班別。無命中時回空結果。各不可選班皆未進入可提交草案。 |
 | AT-15 | 在初選及加退選環境各要求 Agent 選三門。先查資料庫，再於畫面取消勾選一班並確認。 | 確認前只有草案。兩階段各提交兩班，分別回 `PENDING` 或 `ENROLLED`，並更新週課表的對應狀態。 |
@@ -509,7 +537,7 @@ API 與併發測試必須連接 PostgreSQL。使用固定測試時間、學期�
 | AT-21 | 即時加退選期間輸入「我要加選臺科大電子系的高等計算機結構」。另用專題課號測試。 | 授權學生在原請求內完成加選，課表新增該班、扣一個名額並增加學分。 |
 | AT-22 | 輸入未限定校系的同名課、同課兩班、部分課名，或輸入「我可以加選資料庫設計嗎？」與否定句。 | 依情況顯示校系及班號讓學生指定，或只回答問題。選課紀錄維持原狀，學生明確選定候選後才提交。 |
 | AT-23 | 對唯一可辨識班別分別測試額滿、衝堂、缺先修、學分超限、重複選課，以及初選或截止時段。 | 即時加選回對應原因。初選可從候選班別確認登記，確認後課表顯示待分發。 |
-| AT-24 | 用瀏覽器麥克風說出 AT-21 的指令，按「停止並送出」。用真實 Gemini 驗證一次，並使用清楚錄音 fixture 做自動化回歸。 | 顯示辨識文字與加選成功班別，課表新增該班。支援朗讀的瀏覽器可播放結果。 |
+| AT-24 | 用瀏覽器麥克風說出 AT-21 的指令，按「停止並送出」。用伺服器上的 faster-whisper 實機驗證一次，並使用清楚錄音 fixture 做自動化回歸。 | 顯示辨識文字與加選成功班別，課表新增該班。支援朗讀的瀏覽器可播放結果。 |
 | AT-25 | 取消錄音、拒絕麥克風權限、上傳靜音或超限檔，或模擬辨識逾時。 | 取消時無 API 寫入。其餘情境顯示失敗原因與重錄或文字入口，課表維持原狀。音訊資料沒有寫入資料庫或日誌。 |
 | AT-26 | 用文字、語音和手動操作同時競爭最後一席。重送勝出請求。另用相同鍵值和不同音訊重送曾成功的語音加選。 | 一次錄取及一筆選課稽核。其他有效競爭請求回 `SECTION_FULL`。原鍵原內容重播成功結果，改用不同內容回 `409 IDEMPOTENCY_KEY_REUSED`。 |
 | AT-27 | 以預設配置啟動 115-1。測試公開學期清單、其他學期直連與初選截止後分發。 | 公開入口只列 115-1，其他學期讀取回 `404`。初選後依 `AWAITING_ALLOCATION` 與 `RESULTS` 顯示狀態。 |
@@ -532,8 +560,8 @@ API 與併發測試必須連接 PostgreSQL。使用固定測試時間、學期�
 | AT-37 | 以實際 Llama 3.2 3B 執行 §7.5 英文加選及退選，各以兩種問法輸入。 | LangGraph 的請求紀錄可辨識模型名稱及所呼叫工具。允許的指令各觸發正確交易，回覆與 PostgreSQL 選課狀態一致。 |
 | AT-38 | 用英文詢問是否能加選、否定、指定他人、缺學期或班號不明。分別測試模型輸出錯誤與模型逾時。 | 正常查詢可回覆，歧義要求釐清，未授權或故障時顯示原因及 Web 入口。以上各情境無正式選課異動。模型輸入無法變更登入身分或指定任意 SQL。 |
 | AT-39 | 用 Web 與英文助理各跑同一組時段與學分案例。由 15 加 3 達 18，再試無衝堂的一門 3 學分課。獨立測試不同班別的部分時段重疊和首尾相接。 | 18 可成功，21 回 `CREDIT_LIMIT_EXCEEDED`。時段交疊回 `TIME_CONFLICT`，首尾相接且其他條件符合時成功。比較兩入口錯誤碼及最終資料，另跑 AT-07 的併發案例。 |
-| AT-40 | 分別由網頁及英文助理單筆加選、批次確認加選，以及由初選分發錄取，核對各路徑的寄送時點。 | 每次成功的單筆操作或加選草案，以及每位獲錄取學生的分發批次各有一筆確認信事件。真實 Gmail API 回成功與訊息 ID，設定的 Gmail 信箱收到符合學期、課號、班號及學分的信。 |
-| AT-41 | 模擬選課回滾、同鍵重送、Gmail API 暫時失敗及恢復。另測試批次當中一班失敗，以及只有待分發或退選。 | 失敗交易、待分發及退選不排確認信。重送沿用同事件和成功回覆。寄信失敗可重試，正式選課仍可在兩介面查得。 |
+| AT-40 | 分別由網頁及英文助理單筆加選、批次確認加選，以及由初選分發錄取，核對各路徑的寄送時點。 | 每次成功的單筆操作或加選草案，以及每位獲錄取學生的分發批次各有一筆確認信事件。實際寄送（預設 Gmail SMTP，或 `GMAIL_TRANSPORT=api` 的 Gmail API）回成功與訊息 ID，設定的 Gmail 信箱收到符合學期、課號、班號及學分的信。 |
+| AT-41 | 模擬選課回滾、同鍵重送、寄信暫時失敗（SMTP 連線或 Gmail API 5xx）及恢復，以及帳密錯誤後以 `retry-failed` 重寄。另測試批次當中一班失敗，以及只有待分發或退選。 | 失敗交易、待分發及退選不排確認信。重送沿用同事件和成功回覆。寄信失敗可重試，正式選課仍可在兩介面查得。 |
 | AT-42 | 教師登入，查看自己的班及另一名教師的班，班內另放已退選及待分發的學生。用學生帳號直呼教師名單 API。 | 名單僅見本人授課班的 `ENROLLED` 學生。學生回 `403`，其他教師班回 `404`。課表異動後重新查可反映名單變化。 |
 | AT-43 | 為同一名學生新增 82 分、改成 90 分並刷新。試填 101、使用其他教師與學生的 Session，並以其他班的 `enrollment_id` 送出。 | 成績表同筆更新並留下授課教師與異動稽核。分數超範圍回 `422`，錯誤角色回 `403`，班別或選課錯配回 `404`，成績保持原值。 |
 | AT-44 | 從 `v2.1.0` 的 `0005` 資料庫升級，保留原有紀錄，準備含上限 25 的學生。 | migration 後既有班別、選課、通知及 ID 可對照，教師帳號由關聯授權，學分上限有效值不大於 18。較早已超過 18 的紀錄可由維護查詢列出，可正常退選。 |
@@ -543,16 +571,27 @@ API 與併發測試必須連接 PostgreSQL。使用固定測試時間、學期�
 
 ### 9.2 已發布的證據與本版驗收
 
-`v2.0.0` 的驗證報告記錄 146 項後端、13 項 Playwright、8 項部署腳本測試通過，以及本機 Mailpit 寄信與升級至 `0004` 的結果。其語音及 Gemini 介面使用模擬測試。`v2.1.0` 基準依 GitHub 程式及 README 核對，含 `0005`、初選設定與區網語音。4.0 的 P0 功能與實機測試依 §9.1 驗收，執行後逐項附結果。[v2.0.0 驗證報告](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/docs/verification-v2.md) · [v2.1.0 變更](https://github.com/programmerKB/CourseFlow/compare/v2.0.0...v2.1.0)
+`v2.0.0` 的驗證報告記錄 146 項後端、13 項 Playwright、8 項部署腳本測試通過，以及本機 Mailpit 寄信與升級至 `0004` 的結果。`v2.1.0` 基準依 GitHub 程式及 README 核對，含 `0005`、初選設定與區網語音。[v2.0.0 驗證報告](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/docs/verification-v2.md) · [v2.1.0 變更](https://github.com/programmerKB/CourseFlow/compare/v2.0.0...v2.1.0)
+
+`v3.0.1` 的結果記錄於 [v3.0.1 驗證報告](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/docs/verification-v3.0.1.md)，SQL 與執行計畫見 [explain-v3.0.1.txt](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/docs/explain-v3.0.1.txt)。
+
+| 類別 | 結果 |
+|---|---|
+| 自動化測試 | 後端 158 項全部通過（含 FFmpeg 音訊整合測試，無略過）、Playwright 16 項、部署腳本 15 項通過，前端 TypeScript 與 Vite 建置成功。教師規格 AT-37–AT-45 的情境在 `test_teacher_spec.py`。 |
+| AT-37 英文實機 | VM 經 `LLAMA_BASE_URL` 連 Windows 主機 Ollama，模型 `llama3.2:3b`（Q4_K_M）。`student05` 由 15 學分用口語加選到 18 學分並寄確認信事件，21 學分回 `CREDIT_LIMIT_EXCEEDED`，衝堂回 `TIME_CONFLICT`，“I dropped CS301 yesterday” 不寫入，替室友加選被拒，“Get me out of CS101 A asap” 退選回 15 學分。每次約 800 個提示 token、0.4–0.8 秒。 |
+| 中文查詢實機 | 「我想做晶片設計，該修什麼課？」由 Llama 對應數位 IC 路徑；“My research topic is Edge AI, 2 courses only, Wednesday” 走研究路徑、2 門、星期三。`verify_assistant` 的查課與研究推薦皆與 SQL 預期相同。每次約 1,200 個提示 token、0.6–2.1 秒。 |
+| 語音實機 | faster-whisper `base` 轉寫合成與公開華語錄音，選課指令、研究方向與查課語句正確，每段 0.7–1.8 秒，經 API 完成加選與試排。 |
+| Email | SMTP（STARTTLS、登入、錯誤代碼）與 Gmail API（OAuth、重試、訊息 ID）以模擬伺服器驗證；預設 SMTP 將 4 封確認信與 1 封課表信寄入真實 Mailpit。 |
+| 待補驗 | AT-40 實際寄到 Gmail（需填入應用程式密碼後執行 `verify-email --send-to`）、AT-13 Docker 全新冷啟與重啟、真人麥克風錄音。 |
 
 ## 10. 開發安排、課堂展示與交付
 
-### 10.1 交給 Codex 的實作順序
+### 10.1 實作順序（`v3.0.1` 已完成）
 
 1. **重現基準與升級路徑。** 由 `v2.1.0` 開功能分支，在隔離環境啟動 PostgreSQL 與既有測試。記錄 migration `0005` 的資料狀態，建立含學生、授課教師、15 學分及衝堂案例的展示種子。
 2. **共用交易與教師資料模型。** 在既有加退選、分發及試排服務補固定 18 學分上限的一致性。新增教師登入關聯、成績表及授課檢查，完成名單與登分畫面。
 3. **英文選課工具。** 在現有 LangGraph 路由接上實際 Llama 3.2 3B，把英文加退選指令映射到已驗證的共同交易。核對課表、錯誤碼、重送及權限。
-4. **正式確認信。** 加入交易內確認事件與 Gmail API Worker。以測試傳輸驗證重試後，在展示環境完成真實寄信。維持既有課表快照和分發通知。
+4. **正式確認信。** 加入交易內確認事件與 Gmail 寄送 Worker（預設 SMTP 應用程式密碼，可選 Gmail API）。以測試傳輸驗證重試後，在展示環境完成真實寄信。課表快照和分發通知使用同一寄送方式。
 5. **驗收與提交。** 跑 §1.3 對應測試與既有功能回歸。依 README 冷啟與重啟核對持久資料，附上實機 Gmail 和 Llama 證據，再依 §11 整理提交。
 
 ### 10.2 課堂 Demo
@@ -566,10 +605,10 @@ API 與併發測試必須連接 PostgreSQL。使用固定測試時間、學期�
 
 - 可執行的 React、FastAPI、PostgreSQL、LangGraph 專案與 Docker Compose，含教師與學生的虛構種子。
 - ERD、資料字典、Alembic migration、共用交易說明，以及至少一筆名單查詢與一筆有效名額查詢的 SQL 和執行計畫。
-- README、設定範例、測試報告與可重現的版本標籤。README 包含模型服務、Gmail OAuth、授課角色、Demo 流程與回歸結果。
+- README、設定範例、測試報告與可重現的版本標籤 `v3.0.1`。README 包含模型服務（含 Windows Ollama）、Gmail 應用程式密碼與選用 OAuth、語音模型、授課角色、Demo 流程與回歸結果。
 - 教師規格驗收紀錄，包含實際英文模型呼叫、Gmail 收件、成績更新及角色隔離。保留去識別化的截圖或紀錄。
 
-可將本文件放在專案根目錄，給 Codex 下列起始指令。
+本文件 4.0 版曾作為下列起始指令交付實作，成果即 `v3.0.1`。
 
 > 以 CourseFlow `v2.1.0`（`a9c28f3`）與本需求書 4.0 為基準。先在獨立 PostgreSQL 驗證既有測試。依 §1.3 和 FR-21–27 完成英文加退選、Llama 工具流程、18 學分、Gmail API、教師名單及成績。保留既有三校、語音、試排和 16 條修課路徑。更新 README，逐項執行 §9 的教師驗收與既有回歸，記錄真實模型及寄信結果。
 
@@ -579,39 +618,32 @@ API 與併發測試必須連接 PostgreSQL。使用固定測試時間、學期�
 
 | 項目 | 做法 |
 |---|---|
-| 儲存庫 | `programmerKB/CourseFlow`，預設分支 `main`。本文件基準為 `v2.1.0`、`a9c28f3`。[GitHub 專題](https://github.com/programmerKB/CourseFlow) |
+| 儲存庫 | `programmerKB/CourseFlow`，預設分支 `main`。開發起點為 `v2.1.0`（`a9c28f3`），目前版本為 `v3.0.1`（`fa2e6b2`）。[GitHub 專題](https://github.com/programmerKB/CourseFlow) |
 | 功能分支 | 依選課共用規則、教師成績、英文助理或 Gmail 通知分批提交。Pull Request 附需求編號、資料庫升級說明及測試證據。 |
-| README | 記錄啟動、升級、Llama 與 Gmail 設定、角色種子、Demo 步驟、核心驗收與既有功能。 |
+| README | 記錄啟動、從 `v2.1.0` 升級、Llama（含 Windows Ollama）、語音模型與 Gmail 設定、角色種子、Demo 步驟、核心驗收與既有功能。 |
 | 追蹤內容 | 原始碼、鎖定檔、Docker、Alembic、測試、虛構種子、README、需求書與無金鑰的 `.env.example`。實際環境檔、OAuth 資料、憑證私鑰及測試快照放在 Git 追蹤之外。 |
-| 後續交付 | 完成 §9 的測試後，用新的版本標籤固定驗收提交，附模型和 Gmail 的實測結果。 |
+| 版本交付 | 每個版本以 `release/vX.Y.Z` 分支提交，合併至 `main` 並加附註標籤。`v3.0.1` 的發布分支為 `release/v3.0.1`，驗收紀錄見 §9.2。 |
 
 ### 11.2 下載、推送更新與交付
 
-下載固定基準並建立功能分支的範例。
+下載目前版本：
 
 ```bash
-git clone --branch v2.1.0 https://github.com/programmerKB/CourseFlow.git
+git clone --branch v3.0.1 https://github.com/programmerKB/CourseFlow.git
 cd CourseFlow
-git switch -c feat/instructor-grades
 ```
 
-完成實作、確認差異並通過驗收後提交，從 GitHub 建立 Pull Request。
+`v3.0.1` 的發布方式（之後的版本比照辦理）：
 
 ```bash
-git add -- backend/ frontend/ Course_Registration_SRS.md README.md
+git switch -c release/v3.0.1
+git add -A
 git diff --cached --check
-git diff --cached --stat
-git commit -m "feat: add instructor roster and grade management"
-git push -u origin feat/instructor-grades
-```
-
-合併完成並核對 `main` 的驗收結果後，以後續標籤固定交付提交，例如 `v2.2.0`。
-
-```bash
+git commit -m "fix: release CourseFlow v3.0.1"
 git switch main
-git pull --ff-only origin main
-git tag -a v2.2.0 -m "CourseFlow v2.2.0"
-git push origin v2.2.0
+git merge --no-ff release/v3.0.1 -m "Merge CourseFlow v3.0.1"
+git tag -a v3.0.1 -m "CourseFlow v3.0.1"
+git push origin release/v3.0.1 main v3.0.1
 ```
 
 ## 12. 電資修課路徑、研究進程與系統擴充
@@ -671,7 +703,7 @@ git push origin v2.2.0
 | 課程語意推薦 | 加入課程大綱的向量檢索，和首版標籤、關鍵字推薦比較。 | 以人工標註的研究問題和相關課程計算 Precision@5，另記錄各方案可實際選課的比例。 |
 | 進階課表規劃 | 儲存和比較多個候選課表，同時考慮研究相關性、學分需求、可上課時段與校區移動。 | 用同一組題目比較各方案的相關性、可用門數和預估空堂。 |
 | 跨學期自動排課 | 將 FR-20 的建議進程與已公開的開課資料、學分及先修條件配對。 | 利用多個測試學期與學生紀錄，比較排程是否符合先修，並驗證缺課時能重排或提示。 |
-| 即時語音對話 | 評估 Gemini Live API 的串流轉寫、語音回覆及可打斷的對話。 | 比較短錄音上傳與串流的延遲、課名辨識及同名班釐清成功率。選課仍依 §7.5 的指令及規則。 |
+| 即時語音對話 | 評估本機串流轉寫（faster-whisper 串流或較大的 Whisper 模型）、語音回覆及可打斷的對話。 | 比較短錄音上傳與串流的延遲、課名辨識及同名班釐清成功率。選課仍依 §7.5 的指令及規則。 |
 | 實際校際選課 | 在取得各校正式介接後，評估單一登入、各校開課同步、校際修課資格與學分認列。 | 使用各校提供的測試環境比對課程、名額與確認結果。 |
 | 選課機制 | 加入候補、授權碼及志願排序。 | 驗證候補遞補順序、授權資格及志願分發結果。 |
 | 持續整合 | 在 GitHub Actions 對 Pull Request 執行 API、migrations、PostgreSQL 整合測試與前端建置。 | 每次修改以可重現的測試報告檢查合併條件。 |
@@ -679,10 +711,11 @@ git push origin v2.2.0
 ## 13. 技術文件
 
 - 教師正式需求為隨課提供的 `Database.pdf`，University Course Registration System，第 1–4 節。本文件的驗收對照見 §1.3。
-- CourseFlow `v2.1.0` 的原始碼、環境與部署。[固定提交](https://github.com/programmerKB/CourseFlow/commit/a9c28f3269fca5a61d5c300ff1268f6026603c77) · [README](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/README.md) · [架構](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/docs/architecture.md) · [既有驗證紀錄](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/docs/verification-v2.md)
-- Llama 文字推論及 LangGraph、LangChain 工具與人工確認。[Llama 3.2 3B Instruct](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct) · [LangGraph overview](https://docs.langchain.com/oss/python/langgraph/overview) · [LangGraph Interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts)
-- Gmail API 郵件格式、送信與授權。[Sending email](https://developers.google.com/workspace/gmail/api/guides/sending) · [users.messages.send](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send)
+- CourseFlow `v3.0.1` 的原始碼、環境與部署。[固定提交](https://github.com/programmerKB/CourseFlow/commit/fa2e6b230122c7ad88c9db486c21eebc22a6b375) · [README](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/README.md) · [架構](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/docs/architecture.md) · [驗證紀錄](https://github.com/programmerKB/CourseFlow/blob/v3.0.1/docs/verification-v3.0.1.md)
+- 開發起點 CourseFlow `v2.1.0`。[固定提交](https://github.com/programmerKB/CourseFlow/commit/a9c28f3269fca5a61d5c300ff1268f6026603c77) · [README](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/README.md) · [既有驗證紀錄](https://github.com/programmerKB/CourseFlow/blob/v2.1.0/docs/verification-v2.md)
+- Llama 文字推論及 LangGraph、LangChain 工具與人工確認。[Llama 3.2 3B Instruct](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct) · [Ollama](https://ollama.com/library/llama3.2) · [LangGraph overview](https://docs.langchain.com/oss/python/langgraph/overview) · [LangGraph Interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts)
+- Gmail 寄信：應用程式密碼與 SMTP，以及 Gmail API 郵件格式、送信與授權。[應用程式密碼](https://support.google.com/accounts/answer/185833) · [Sending email](https://developers.google.com/workspace/gmail/api/guides/sending) · [users.messages.send](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send)
 - PostgreSQL 選課一致性。[Explicit Locking](https://www.postgresql.org/docs/16/explicit-locking.html) · [Transaction Isolation](https://www.postgresql.org/docs/16/transaction-iso.html) · [Partial Indexes](https://www.postgresql.org/docs/16/indexes-partial.html)
 - Web、語音及部署。[FastAPI Features](https://fastapi.tiangolo.com/features/) · [FastAPI Request Forms and Files](https://fastapi.tiangolo.com/tutorial/request-forms-and-files/) · [Docker Compose startup order](https://docs.docker.com/compose/how-tos/startup-order/) · [MDN getUserMedia](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia) · [MediaRecorder](https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder) · [SpeechSynthesis](https://developer.mozilla.org/en-US/docs/Web/API/SpeechSynthesis)
-- 既有 Gemini 功能與未來語音互動。[LangChain Gemini 整合](https://docs.langchain.com/oss/python/integrations/chat/google_generative_ai) · [Gemini 模型](https://ai.google.dev/gemini-api/docs/models) · [Gemini 音訊輸入](https://ai.google.dev/gemini-api/docs/audio) · [Gemini Live API](https://ai.google.dev/gemini-api/docs/live)
+- 本機語音辨識。[faster-whisper](https://github.com/SYSTRAN/faster-whisper) · [OpenCC](https://github.com/BYVoid/OpenCC)
 - GitHub 版本交付。[本機專案上傳](https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github) · [Pull Requests](https://docs.github.com/en/pull-requests/reference/pull-requests) · [忽略檔案](https://docs.github.com/en/get-started/git-basics/ignoring-files) · [git tag](https://git-scm.com/docs/git-tag)
