@@ -30,8 +30,9 @@ flowchart LR
     Views --> PG
     PG --> Outbox[通知 Outbox]
     Worker[獨立通知 Worker] --> Outbox
-    Worker -->|交易提交後 SMTP| Mailpit[Mailpit / SMTP]
-    Worker -->|REGISTRATION_CONFIRMATION| Gmail[Gmail API users.messages.send]
+    Worker -->|交易提交後，所有通知信（預設）| GmailSMTP[Gmail SMTP 應用程式密碼]
+    Worker -.->|GMAIL_TRANSPORT=api| Gmail[Gmail API users.messages.send]
+    Worker -.->|未設定 Gmail 帳號| Mailpit[本機 Mailpit]
 ```
 
 ```mermaid
@@ -104,9 +105,9 @@ erDiagram
 
 研究路徑由 `roadmap_data.py` 提供固定的科目對應及專題評估內容。後端依公開的班別與登入者的通過紀錄填入開課、先修和進度狀態。學生要求試排時才建立研究路徑草案。
 
-Worker 以 SKIP LOCKED 領取、60 秒租約與 UUID claim token 防止舊工作回寫。SMTP 位於資料庫交易外，失敗間隔為 1、5 分鐘，最多三次。每個 Outbox 使用固定 Message-ID。SMTP 回應遺失仍可能重複投遞，資料庫事件不會重複建立。
+Worker 以 SKIP LOCKED 領取、60 秒租約與 UUID claim token 防止舊工作回寫。所有通知信（選課確認、課表、初選登記確認、分發結果）都在資料庫交易外寄出：預設經 Gmail SMTP（STARTTLS 與應用程式密碼，訊息 ID 以 `smtp:` 開頭），`GMAIL_TRANSPORT=api` 時改經 Gmail API 並保存 Gmail 訊息 ID，都存回 `provider_message_id`。連線類錯誤間隔 1、5 分鐘，最多三次；帳密或設定錯誤直接記為失敗，修正後以 `manage retry-failed` 重新排入。伺服器回應遺失仍可能重複投遞，資料庫事件不會重複建立。
 
-## 教師規格（0006 與 3.0.0）
+## 教師規格（0006 與 3.0.1）
 
 `0006_instructor_grades_gmail.py` 接在 `0005` 之後：角色加入 `INSTRUCTOR`；`instructors.user_id` 是可空且唯一的 FK，未啟用登入的教師仍可授課；`grades(enrollment_id PK/FK, score numeric(5,2) CHECK 0–100, graded_by_user_id, created_at, updated_at)` 每筆修課只保留一筆目前成績；`notification_outbox.provider_message_id` 保存 Gmail 訊息 ID；`student_terms.credit_limit` 改為 `CHECK (credit_limit BETWEEN 0 AND 18)`。升級前大於 18 的上限先寫入 `CREDIT_LIMIT_CAPPED` 稽核再改為 18；既有選課已超限者由 `v_credit_limit_overloads` 列出。`ix_sections_instructor_term(instructor_id, term_id)` 支援教師班別查詢。
 

@@ -5,7 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, AfterValidator, model_validator, ConfigDict
 from sqlalchemy import select, delete, func
 from .models import (Term, RegistrationPeriod, Section, SectionMeeting, SectionPrerequisite, Course,
-                     Instructor, Department, Enrollment)
+                     Instructor, Enrollment)
 from .errors import DomainError
 from .registration import get_term, get_section, now, audit, section_dict
 

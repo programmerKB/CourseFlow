@@ -1,4 +1,7 @@
-"""Gmail API delivery for registration confirmations (FR-24, teacher item T-03).
+"""Gmail API delivery (GMAIL_TRANSPORT=api; teacher item T-03 names "Email Service: Gmail API").
+
+The default transport is Gmail SMTP with an app password (see worker.deliver_smtp). The message
+builders below are shared by both transports.
 
 The worker exchanges the configured OAuth refresh token for an access token with the
 ``https://www.googleapis.com/auth/gmail.send`` scope, then calls ``users.messages.send``
@@ -8,6 +11,8 @@ evidence. Only fixed error codes are stored; provider responses can contain priv
 import base64
 import threading
 import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from email.message import EmailMessage
 from email.utils import make_msgid
 from urllib.parse import urlencode
@@ -20,6 +25,20 @@ TOKEN_URL = 'https://oauth2.googleapis.com/token'
 SEND_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send'
 SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send'
 DAYS = '一二三四五六日'
+TAIPEI = ZoneInfo('Asia/Taipei')
+# Used only when no sending account is configured (the Mailpit preview).
+PREVIEW_SENDER = 'CourseFlow 選課通知 <courseflow@example.test>'
+GMAIL_HINTS = {
+    'GMAIL_NOT_CONFIGURED': '尚未設定 GMAIL_CLIENT_ID、GMAIL_CLIENT_SECRET、GMAIL_REFRESH_TOKEN、GMAIL_SENDER。'
+                            '設定後重建 api 與 worker，再執行 python -m app.manage retry-failed 重寄。',
+    'GMAIL_AUTH_FAILED': 'OAuth 用戶端或 refresh token 無效或已撤銷，請以 scripts/gmail-oauth.py 重新取得。',
+    'GMAIL_FORBIDDEN': '帳號未授權 gmail.send，或 GMAIL_SENDER 不是授權帳號本身或其已驗證的別名。',
+    'GMAIL_REJECTED': 'Gmail API 拒絕這封信（例如收件地址無效），請檢查收件人信箱。',
+    'GMAIL_RATE_LIMITED': '超過 Gmail API 速率或每日寄信上限，稍後會自動重試。',
+    'GMAIL_TIMEOUT': '連線 Gmail API 逾時，稍後會自動重試。',
+    'GMAIL_UNAVAILABLE': 'Gmail API 暫時無法使用，稍後會自動重試。',
+    'GMAIL_INVALID_RESPONSE': 'Gmail API 回應格式不正確，稍後會自動重試。',
+}
 
 
 class GmailError(Exception):
@@ -34,11 +53,48 @@ _token_lock = threading.Lock()
 _token_cache: dict = {}
 
 
+def setting_problems():
+    """Names of missing or malformed GMAIL_* settings. Values are never returned or logged."""
+    values = {'GMAIL_CLIENT_ID': settings.gmail_client_id.strip(),
+              'GMAIL_CLIENT_SECRET': settings.gmail_client_secret.get_secret_value().strip(),
+              'GMAIL_REFRESH_TOKEN': settings.gmail_refresh_token.get_secret_value().strip(),
+              'GMAIL_SENDER': settings.gmail_sender.strip()}
+    missing = [name for name, value in values.items() if not value]
+    malformed = []
+    if values['GMAIL_CLIENT_ID'] and not values['GMAIL_CLIENT_ID'].endswith('.apps.googleusercontent.com'):
+        malformed.append('GMAIL_CLIENT_ID')
+    if any(value.startswith(('<', '"', "'")) or ' ' in value
+           for value in (values['GMAIL_CLIENT_SECRET'], values['GMAIL_REFRESH_TOKEN'])):
+        malformed.extend(name for name in ('GMAIL_CLIENT_SECRET', 'GMAIL_REFRESH_TOKEN')
+                         if values[name].startswith(('<', '"', "'")) or ' ' in values[name])
+    if values['GMAIL_SENDER'] and '@' not in values['GMAIL_SENDER']:
+        malformed.append('GMAIL_SENDER')
+    return missing, malformed
+
+
+def taipei_time(value):
+    """The outbox stores ISO timestamps in UTC; students read Taipei time everywhere else."""
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return str(value)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(TAIPEI).strftime('%Y/%m/%d %H:%M')
+
+
+def sender():
+    """Gmail only sends as the signed-in account (SMTP) or the authorized account/alias (API)."""
+    if settings.gmail_transport == 'api':
+        return settings.gmail_sender.strip() or PREVIEW_SENDER
+    return settings.smtp_from.strip() or settings.smtp_user.strip() or PREVIEW_SENDER
+
+
 def build_confirmation(job):
     """Render one confirmation. ``job`` carries the outbox payload and recipient address."""
     p = job['payload']
     message = EmailMessage()
-    message['From'] = settings.gmail_sender or settings.smtp_from
+    message['From'] = sender()
     message['To'] = job['email']
     message['Subject'] = f'{p["term_code"]} 選課確認 Course registration confirmed'
     message['Message-ID'] = make_msgid(idstring=f'outbox-{job["id"]}', domain='courseflow.example.test')
@@ -53,10 +109,10 @@ def build_confirmation(job):
                          f' {meeting.get("room") or ""}'.rstrip())
     lines += ['', f'本學期正式選課合計 {p["total_credits"]} 學分（上限 {p["credit_limit"]} 學分）。',
               f'Registered total: {p["total_credits"]} of {p["credit_limit"]} credits.',
-              f'提交時間 Submitted at: {p["submitted_at"]}']
+              f'提交時間 Submitted at: {taipei_time(p["submitted_at"])}（臺北時間 Taipei time）']
     path = p.get('url') or '/timetable?' + urlencode({'term': job['term_id']})
     lines += ['', '查看我的課表 View my timetable: ' + settings.app_origin.rstrip('/') + path,
-              '', '此信由 CourseFlow 選課系統透過 Gmail API 寄出。']
+              '', '此信由 CourseFlow 選課系統寄出。']
     message.set_content('\n'.join(lines))
     return message
 

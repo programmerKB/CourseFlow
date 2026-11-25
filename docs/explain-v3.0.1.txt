@@ -1,4 +1,4 @@
--- CourseFlow 3.0.0 · PostgreSQL 16 · seeded add-drop demo (courses_e2e_test), 2026-11-24T16:53Z
+-- CourseFlow 3.0.1 · PostgreSQL 16 · seeded add-drop demo (courses_e2e_test), 2026-11-24T16:53Z
 -- 1. Instructor sections (FR-25): uses ix_sections_instructor_term
 SELECT id FROM sections WHERE term_id = '8abc15dd-c1b8-53ed-a570-ae723e17a762' AND instructor_id = '430542ee-91bd-5f8a-be8c-489a1191c5da';
 Seq Scan on sections  (cost=0.00..3.21 rows=4 width=16) (actual time=0.005..0.011 rows=4 loops=1)

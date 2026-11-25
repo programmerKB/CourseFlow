@@ -1,4 +1,4 @@
-# CourseFlow v3.0.0 驗收
+# CourseFlow v3.0.1 驗收
 
 驗收日為 2026-11-25（臺北時間）。需求依專案根目錄的 [需求說明書 4.0](../Course_Registration_SRS.md) 與教師提供的 `Database.pdf` 第 1–4 節。驗收使用本機 PostgreSQL 16 的隔離資料庫（`courses_test`、`courses_e2e_test`）、FastAPI、Vite 與 Chromium，資料由專題種子建立。英文助理與中文查詢已連到 Windows 本機 Ollama 的 Llama 3.2 3B 實機驗證，語音以 VM 上的 faster-whisper 實機驗證；本版已移除 Gemini，不使用雲端模型。Gmail API 尚未實寄，步驟列於文末。
 
@@ -8,18 +8,18 @@
 |---|---|
 | T-01、T-09–T-11 英文加退選 | LangGraph `english_registration`：`understand`（Llama 3.2 3B 結構化意圖）→ `decide`（明確性防護）→ `registration_tool` / `read_tool` / `reply`。兩種問法的加選與退選各自完成，稽核記錄 `agent`、`model` 與 `channel`，回應及日誌列出呼叫的工具。問句、否定、條件、引述、兩門課、替他人操作、課名不明與模型編造課號皆不寫入。 |
 | T-02 Web 加退選 | 原有課程查詢與我的課表加退選通過回歸。加選成功提示「選課成功，確認信已排入寄送」。 |
-| T-03 Gmail 確認信 | 單筆加選（網頁、英文、中文）、加退選草案確認與分發錄取在同一交易建立一筆 `REGISTRATION_CONFIRMATION`。退選、待分發、失敗請求與同鍵重送不增加事件。Worker 以 OAuth refresh token 呼叫 `users.messages.send`，保存 Gmail 訊息 ID；以模擬 HTTP 驗證訊息格式、503 重試後成功、未設定及授權失敗直接 `FAILED`。 |
+| T-03 Gmail 確認信 | 單筆加選（網頁、英文、中文）、加退選草案確認與分發錄取在同一交易建立一筆 `REGISTRATION_CONFIRMATION`。退選、待分發、失敗請求與同鍵重送不增加事件。Worker 以 OAuth refresh token 呼叫 `users.messages.send`，保存 Gmail 訊息 ID；以模擬 HTTP 驗證訊息格式、503 重試後成功、未設定及授權失敗直接 `FAILED`。所有通知信預設以 Gmail SMTP（應用程式密碼）寄出，`GMAIL_TRANSPORT=api` 時改用 Gmail API；規格要求 Gmail API，差異見下方「Email 寄送方式」。 |
 | T-04、T-05 衝堂與 18 學分 | 網頁與英文助理同一組案例：15 + 3 = 18 受理，21 回 `CREDIT_LIMIT_EXCEEDED`，部分時段重疊回 `TIME_CONFLICT`，首尾相接可選；兩入口錯誤碼與最終資料列相同。資料庫拒絕大於 18 的個人上限，較低上限照常生效。 |
 | T-06、T-07、T-12 名單與成績 | 教師只看到本人授課班的 `ENROLLED` 學生；退選、待分發學生不列入。成績 82 → 90 寫入同一列與兩筆稽核，101、-1、三位小數及非數字回 `422`，他班或錯配修課回 `404`，學生與管理員回 `403`。退選後不能評分，重新加選沿用原修課 ID 與成績。 |
 | T-08、T-13 PostgreSQL 與一致性 | 從 `0005` 建立舊資料（個人上限 25、已選 21 學分）後升級：ID 保留、上限改為 18 並留稽核、`v_credit_limit_overloads` 列出超限學期，學生仍可退選。網頁加選、英文退選、英文加選、網頁退選使用同一修課 ID，教師名單同步。 |
 
 ## 測試結果
 
-- **PostgreSQL 與 API** 145 項全部通過，無略過（FFmpeg 音訊整合測試以本機 FFmpeg 9.0 執行）。移除 Gemini 時刪除兩個 Gemini 專用測試檔，`test_chat_diagnostics.py` 改為驗證本機模型的錯誤代碼、請求格式、欄位核對、研究路徑分流與 `verify_assistant`，`test_v2.py` 以替身 Whisper 模型驗證取樣格式、信心判斷與繁體轉換。新增 `test_teacher_spec.py` 22 項（AT-37–AT-45、Llama 與 Gmail 介面、Windows Ollama 連線診斷、經真實 HTTP 呼叫模型並依其輸出決策、種子）。英文流程以 `CHAT_STUB=true` 的固定意圖解析代替模型，其後的 LangGraph 防護、工具與交易與實機相同；另以模擬傳輸驗證 Ollama 與 OpenAI 相容格式、逾時、404 與非 JSON 輸出。
+- **PostgreSQL 與 API** 158 項全部通過，無略過（FFmpeg 音訊整合測試以本機 FFmpeg 9.0 執行）。移除 Gemini 時刪除兩個 Gemini 專用測試檔，`test_chat_diagnostics.py` 改為驗證本機模型的錯誤代碼、請求格式、欄位核對、研究路徑分流與 `verify_assistant`，`test_v2.py` 以替身 Whisper 模型驗證取樣格式、信心判斷與繁體轉換。新增 `test_teacher_spec.py` 22 項（AT-37–AT-45、Llama 與 Gmail 介面、Windows Ollama 連線診斷、經真實 HTTP 呼叫模型並依其輸出決策、種子）。英文流程以 `CHAT_STUB=true` 的固定意圖解析代替模型，其後的 LangGraph 防護、工具與交易與實機相同；另以模擬傳輸驗證 Ollama 與 OpenAI 相容格式、逾時、404 與非 JSON 輸出。
 - **既有測試調整** 依 FR-24，四項舊測試原本斷言正式加選不建立通知，現改為各成功操作一筆確認信；`test_single_term_seed` 的示範上限由 25 改為 18；SMTP 測試的 `finish` 替身改為接受訊息 ID 參數。
 - **瀏覽器與前端** 16 項 Playwright 測試通過（原 15 項及新增 `teacher-spec.spec.ts`；移除 Gemini 後重跑仍全數通過），TypeScript 與 Vite 產出成功。新測試以 `student05`（15 學分）用英文加選到 18 學分、觸發超修與衝堂、英文退選後回到 15 學分，再以 `teacher01` 登錄 82、改為 90.5 並驗證 101 的表單錯誤。
-- **部署檢查** 14 項腳本測試（新增 `--llm` 順序與 Llama 連不到時只警告）、Shell 語法與 Compose 設定（含 `llm` profile）通過。
-- **SQL 與執行計畫** 教師班別、名單含成績、單班有效名額與學生學期正式學分的 SQL 及 `EXPLAIN (ANALYZE, BUFFERS)` 見 [explain-v3.0.txt](explain-v3.0.txt)。示範資料量小時規劃器選擇循序掃描；關閉循序掃描的計畫顯示 `ix_sections_instructor_term`、`ix_enrolled_section` 與 `grades_pkey` 可用。
+- **部署檢查** 15 項腳本測試（含 Gmail API 未設定時只警告）、（新增 `--llm` 順序與 Llama 連不到時只警告）、Shell 語法與 Compose 設定（含 `llm` profile）通過。
+- **SQL 與執行計畫** 教師班別、名單含成績、單班有效名額與學生學期正式學分的 SQL 及 `EXPLAIN (ANALYZE, BUFFERS)` 見 [explain-v3.0.1.txt](explain-v3.0.1.txt)。示範資料量小時規劃器選擇循序掃描；關閉循序掃描的計畫顯示 `ix_sections_instructor_term`、`ix_enrolled_section` 與 `grades_pkey` 可用。
 
 ## AT-37 實機紀錄（2026-11-25）
 
@@ -70,6 +70,15 @@ VM（VMware NAT，`192.168.169.128`）經 `LLAMA_BASE_URL=http://192.168.169.1:1
 
 **與 SRS 4.0 的差異** §7.6 寫明送至 `GEMINI_AUDIO_MODEL` 並在介面提示「錄音會送往 Gemini 辨識」，AT-24 要求以真實 Gemini 驗證一次；本版改為本機 Whisper，介面提示改為「在本系統伺服器以 Whisper 轉寫」。§8「Agent 與模型」規定需經模型處理的文字意圖及對話使用 Llama 3.2 3B，Gemini 僅「可」繼續用於語音與舊推薦，因此文字部分改用 Llama 符合該條。
 
+## Email 寄送方式（2026-11-25）
+
+曾將所有通知信改經 Gmail API；因 OAuth 用戶端、測試使用者與 7 天失效的 refresh token 設定繁瑣，依使用者決定改回 **Gmail SMTP + 應用程式密碼** 作為預設（`GMAIL_TRANSPORT=smtp`），Gmail API 保留為選項（`GMAIL_TRANSPORT=api`）。**這與 `Database.pdf`「Email Service：Gmail API」不同**，驗收若要求 Gmail API，改設 `api` 並依 README 取得 OAuth 憑證即可，程式與測試兩條路徑都保留。
+
+- 兩種方式寄出的信種相同：選課確認、課表、初選登記確認、分發結果，皆保存訊息 ID（SMTP 以 `smtp:` 開頭）。
+- SMTP 一律先 STARTTLS 再登入，不降級為明文；應用程式密碼的空白自動移除；帳密錯誤記為 `SMTP_AUTH_FAILED`、未填帳號記為 `SMTP_NOT_CONFIGURED`，都不重試，修正後以 `retry-failed` 重寄；連線失敗記為 `SMTP_UNREACHABLE` 並自動重試。錯誤欄只存固定代碼。
+- `python -m app.manage verify-email [--send-to]` 依設定檢查 Gmail SMTP 登入或 Gmail API 授權，列出缺少的欄位名稱（不印出值）；部署最後的「檢查 Gmail 寄信」呼叫同一指令，失敗只警告。
+- 以模擬 SMTP 伺服器驗證 TLS 與登入順序、登入失敗、未設定與連線失敗；瀏覽器回歸後以預設 SMTP 清空佇列，4 封確認信與 1 封課表信進入真實 Mailpit。Gmail API 路徑以模擬 Gmail 傳輸驗證。實際寄到 Gmail 仍待使用者填入應用程式密碼後執行 `verify-email --send-to`。
+
 ## 修正的問題
 
 - 只輸入英文研究方向名稱（如 `RF`、`LLM`、`Edge AI`）時仍走既有修課路徑流程；含加退選、課表或名額等字詞的英文訊息才交給英文助理。
@@ -81,13 +90,18 @@ VM（VMware NAT，`192.168.169.128`）經 `LLAMA_BASE_URL=http://192.168.169.1:1
 - 語音轉寫常在動詞後加「、」或在「班」前留空格（「我想要加選、CS101 A 班」），單門指令解析器誤判為多門。現在接受這兩種寫法，兩門課之間的「、」仍要求一次一門。
 - `test_at26` 過去因本機無 FFmpeg 而略過，仍預期不建立確認信；依 FR-24 改為勝出者建立一筆。
 - 發布前檢查：OpenAI 相容端點不強制 JSON schema，模型若在星期、門數、研究方向或時段欄位回傳清單或物件，查詢計畫核對會拋出 `TypeError` 並回 `CHAT_FAILED`。現在型別不符的欄位一律捨棄（`test_wrongly_typed_model_fields_are_ignored_not_fatal`）。
+- 確認信的提交時間原本直接印出 UTC ISO 字串（`2026-11-25T02:05:09+00:00`），改為臺北時間 `2026/11/25 10:05`。
+- 教師登錄成績時若學生剛退選（`404`），畫面重新載入名單會同時清掉錯誤訊息，教師看不到原因；改以提示訊息顯示。
+- 教務管理的 Email 通知狀態在錯誤代碼旁加上處理提示。
+- `.env` 值前後的空白會讓 SMTP 主機查不到或登入失敗，現在讀入時去除；`SMTP_PORT=465` 改用 SSL 連線（Gmail 另一種連線方式），不再卡住後誤報連不到。
+- `verify-email` 原本只回 `GMAIL_NOT_CONFIGURED`，看不出缺哪一欄；現在列出缺少或格式錯誤的欄位名稱與取得方式。`scripts/gmail-oauth.py` 先檢查用戶端 ID 格式，避免 Google 回 `401 invalid_client`。
 - 發布前檢查：語音請求總時限 30 秒。轉寫成功後若本機模型首次載入超時，原本回「語音辨識暫時無法使用」且遺失辨識文字；現在回 `CHAT_UNAVAILABLE`／`LLAMA_TIMEOUT` 並保留 `transcript`，學生可直接重送（`test_model_timeout_after_speech_keeps_the_transcript`）。
 
 ## 部署環境待驗
 
-- **AT-40（實機 Gmail API）** 需要寄件 Gmail 帳號的 OAuth 用戶端與 refresh token（`scripts/gmail-oauth.py`）。設定後執行 `python -m app.manage verify-gmail --send-to <信箱>`，以 `set-email` 指定示範學生收件信箱，完成網頁加選、英文加選、草案確認與分發錄取各一次，核對收件內容與管理頁的 Gmail 訊息 ID。
+- **AT-40（實機寄信）** 在 `.env` 填入 Gmail 帳號與應用程式密碼（或 `GMAIL_TRANSPORT=api` 與 OAuth 憑證），執行 `python -m app.manage verify-email --send-to <信箱>`，以 `set-email` 指定示範學生收件信箱，完成網頁加選、英文加選、草案確認與分發錄取各一次，核對收件內容與管理頁的訊息 ID。
 - **AT-13** 需在可連 Docker daemon 的環境驗證映像建置、`--llm` 模型下載、容器冷啟與重啟後的 volume 保留。
 
 ## GitHub 交付
 
-以 `release/v3.0.0` 分支提交，合併至 `main` 並標記 `v3.0.0`（移除 Gemini 屬設定不相容的變更，因此升主版號）。上節的 AT-40 實寄與 AT-13 Docker 冷啟仍待在部署主機補驗。
+以 `release/v3.0.1` 分支提交，合併至 `main` 並標記 `v3.0.1`（主版號 3 因移除 Gemini 屬設定不相容的變更）。上節的 AT-40 實寄與 AT-13 Docker 冷啟仍待在部署主機補驗。

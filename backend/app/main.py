@@ -32,7 +32,7 @@ log = logging.getLogger('courses')
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 if settings.chat_stub:
     log.warning('CHAT_STUB=true: the assistants use fixed test rules and do not call the local Llama model.')
-app = FastAPI(title='大學選課與課程推薦系統', version='3.0.0')
+app = FastAPI(title='大學選課與課程推薦系統', version='3.0.1')
 
 
 @app.on_event('startup')

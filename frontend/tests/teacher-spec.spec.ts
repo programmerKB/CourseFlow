@@ -26,7 +26,7 @@ test("英文助理加退選、18 學分與衝堂限制，教師名單與成績",
   let reply = await say(page, "Please enroll me in CS101, section A.");
   await expect(reply).toContainText("Done. You are now enrolled in CS101");
   await expect(reply).toContainText("18.0 of 18.0 credits");
-  await expect(reply).toContainText("選課確認信已排入寄送（Gmail API）");
+  await expect(reply).toContainText("選課確認信已排入寄送（Gmail）");
   await expect(reply.locator(".agent-trace")).toContainText("add_course");
   reply = await say(page, "I'd like to add CS303 A.");
   await expect(reply).toContainText("exceed your credit limit");

@@ -49,6 +49,8 @@ if action == 'exec' and any('http://frontend/api/v1/terms' in value for value in
     sys.exit(1)
 if action == 'exec' and 'app.verify_llama' in options and failure == 'llama':
     sys.exit(1)
+if action == 'exec' and 'verify-email' in options and failure == 'gmail':
+    sys.exit(1)
 if action == 'ps':
     if '--quiet' in options:
         print(options[-1] + '-container')
@@ -190,6 +192,17 @@ class DeployTests(unittest.TestCase):
         frontend = next(i for i, call in enumerate(calls) if 'up' in call and 'frontend' in call)
         self.assertLess(frontend, check)
         self.assertIn('--server-only', calls[check])
+
+    def test_unconfigured_gmail_only_warns_after_the_app_is_up(self):
+        result = self.run_deploy('--skip-seed', failure='gmail')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('部署完成。', result.stdout)
+        self.assertIn('Gmail 目前無法寄信', result.stderr)
+        self.assertIn('retry-failed', result.stderr)
+        calls = self.calls()
+        check = next(i for i, call in enumerate(calls) if 'verify-email' in call)
+        frontend = next(i for i, call in enumerate(calls) if 'up' in call and 'frontend' in call)
+        self.assertLess(frontend, check)
 
     def test_missing_tls_files_fail_before_restarting_services(self):
         result = self.run_deploy('--https')

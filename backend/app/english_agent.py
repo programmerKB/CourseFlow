@@ -563,7 +563,7 @@ def registration_tool(state):
                 answer = (f'Done. You are now enrolled in {section_label(section)} ({credits_text(section["credits"])} '
                           f'credits, {meeting_text(section["meetings"])}). Your registered total is '
                           f'{credits_text(outcome.total_credits)} of {credits_text(limit)} credits. '
-                          'A confirmation email has been queued for delivery through the Gmail API.')
+                          'A confirmation email has been queued for delivery through Gmail.')
             else:
                 answer = (f'Done. You have dropped {section_label(section)}. Your registered total is now '
                           f'{credits_text(outcome.total_credits)} of {credits_text(limit)} credits, '

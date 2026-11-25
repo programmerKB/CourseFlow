@@ -1,7 +1,11 @@
 """Transactional outbox: leases committed before delivery, token guarded completion.
 
-REGISTRATION_CONFIRMATION events are delivered with the Gmail API (FR-24). TIMETABLE and
-ALLOCATION notices keep the SMTP transport (Mailpit or Gmail SMTP).
+Every email (registration confirmations, timetables, initial-registration receipts and allocation
+results) uses one transport chosen by GMAIL_TRANSPORT:
+
+* ``smtp`` (default): Gmail SMTP with an app password (smtp.gmail.com:587, STARTTLS). With the
+  default SMTP_HOST=mailpit and no account the messages land in the bundled Mailpit inbox.
+* ``api``: the Gmail API (``users.messages.send``), the transport named by the teacher specification.
 """
 import argparse
 import json
@@ -13,33 +17,44 @@ import threading
 from contextlib import closing
 from datetime import timedelta
 from email.message import EmailMessage
+from email.utils import make_msgid
 from urllib.parse import urlencode
 from uuid import uuid4
 from sqlalchemy import select, update, or_, and_
 from .db import SessionLocal
 from .config import settings
-from .gmail import GmailError, build_confirmation, send_message
+from .gmail import GMAIL_HINTS, GmailError, build_confirmation, sender, send_message
 from .models import NotificationOutbox, User
 from .registration import CONFIRMATION_TYPE, now
 
 log = logging.getLogger('courses.worker')
 
-
 SMTP_HINTS = {
+    'SMTP_NOT_CONFIGURED': 'SMTP_HOST 是 smtp.gmail.com，但 SMTP_USER 或 SMTP_PASSWORD 未填。填入 Gmail 地址與 16 碼'
+                           '應用程式密碼後重建 api 與 worker，再執行 manage retry-failed 重寄。',
+    'SMTP_AUTH_FAILED': 'Gmail 拒絕登入：SMTP_USER 須是完整 Gmail 地址，SMTP_PASSWORD 須是 16 碼「應用程式密碼」'
+                        '（帳戶要先開啟兩步驟驗證），不是 Gmail 登入密碼。修正後執行 manage retry-failed 重寄。',
+    'SMTP_UNREACHABLE': '連不到 SMTP 伺服器：核對 SMTP_HOST、SMTP_PORT（Gmail 為 smtp.gmail.com、587）與主機對外網路。',
     'SMTP_STARTTLS_UNSUPPORTED': '伺服器不支援 STARTTLS；請核對 SMTP_HOST、SMTP_PORT 與 SMTP_STARTTLS。Gmail 使用 smtp.gmail.com:587 並開啟 STARTTLS。',
-    'SMTP_AUTH_UNSUPPORTED': '伺服器不支援帳密登入；若目前連到 Mailpit，寄送真實郵件需改成 Gmail 等 SMTP 服務。Mailpit 測試模式請清空 SMTP_USER 與 SMTP_PASSWORD。',
+    'SMTP_AUTH_UNSUPPORTED': '伺服器不支援帳密登入；若目前連到 Mailpit，寄送真實郵件需改成 smtp.gmail.com。Mailpit 預覽請清空 SMTP_USER 與 SMTP_PASSWORD。',
 }
 
 
 class SMTPConfigurationError(smtplib.SMTPNotSupportedError):
     """Only predefined codes/hints are stored; provider responses may contain private data."""
-    def __init__(self, code):
+    def __init__(self, code, *, permanent=True):
         self.code = code
+        self.permanent = permanent
         super().__init__(SMTP_HINTS[code])
 
 
-def smtp_error_code(error):
+def error_code(error):
     return error.code if isinstance(error, (SMTPConfigurationError, GmailError)) else type(error).__name__
+
+
+def smtp_password():
+    # Google shows app passwords in four groups ("abcd efgh ijkl mnop"); the spaces are not part of it.
+    return settings.smtp_password.get_secret_value().replace(' ', '').strip()
 
 
 def claim_one():
@@ -82,16 +97,19 @@ def timetable_email_lines(payload):
     return lines
 
 
-def send_smtp(job):
+NOTICE_LABELS = {'ENROLLED': '加選成功', 'DROPPED': '退選成功', 'ALLOCATION': '初選分發結果',
+                 'INITIAL_RECEIPT': '初選登記確認', 'TIMETABLE': '每週課表'}
+
+
+def build_notice(job):
+    """Render a timetable, initial-registration receipt or allocation notice."""
     p = job['payload']
     notice_type = job['type']
-    labels = {'ENROLLED': '加選成功', 'DROPPED': '退選成功', 'ALLOCATION': '初選分發結果',
-              'INITIAL_RECEIPT': '初選登記確認', 'TIMETABLE': '每週課表'}
-    label = labels.get(notice_type, '選課通知')
+    label = NOTICE_LABELS.get(notice_type, '選課通知')
     msg = EmailMessage()
-    msg['From'], msg['To'] = settings.smtp_from, job['email']
+    msg['From'], msg['To'] = sender(), job['email']
     msg['Subject'] = f'{p.get("term_code", "")} {label}'
-    msg['Message-ID'] = f'<outbox-{job["id"]}@course-registration.example.test>'
+    msg['Message-ID'] = make_msgid(idstring=f'outbox-{job["id"]}', domain='courseflow.example.test')
     content = [f'{p.get("term_code", "")} {label}']
     if notice_type == 'ALLOCATION':
         for result in p.get('results', []):
@@ -109,14 +127,31 @@ def send_smtp(job):
         path += '?' + urlencode({'term': job['term_id']})
     link = settings.app_origin.rstrip('/') + path
     content.append(f'\n查看我的課表 {link}' if notice_type == 'TIMETABLE' else '查看結果：' + link)
+    content.append('\n此信由 CourseFlow 選課系統寄出。')
     msg.set_content('\n'.join(content))
-    deliver_smtp(msg, job['id'])
+    return msg
 
 
-def deliver_smtp(msg, event_id):
-    with closing(smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10)) as smtp:
+def build_message(job):
+    return build_confirmation(job) if job['type'] == CONFIRMATION_TYPE else build_notice(job)
+
+
+def open_smtp():
+    """Connect, upgrade to TLS and log in. Never falls back to plaintext login."""
+    if settings.smtp_host.strip().lower() == 'smtp.gmail.com' and not (settings.smtp_user.strip() and smtp_password()):
+        raise SMTPConfigurationError('SMTP_NOT_CONFIGURED')
+    implicit_tls = settings.smtp_port == 465  # Gmail also offers SSL on 465 instead of STARTTLS on 587
+    try:
+        if implicit_tls:
+            smtp = smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10,
+                                    context=ssl.create_default_context())
+        else:
+            smtp = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10)
+    except OSError:
+        raise SMTPConfigurationError('SMTP_UNREACHABLE', permanent=False) from None
+    try:
         smtp.ehlo_or_helo_if_needed()
-        if settings.smtp_starttls:
+        if settings.smtp_starttls and not implicit_tls:
             if not smtp.has_extn('starttls'):
                 raise SMTPConfigurationError('SMTP_STARTTLS_UNSUPPORTED')
             smtp.starttls(context=ssl.create_default_context())
@@ -124,7 +159,18 @@ def deliver_smtp(msg, event_id):
         if settings.smtp_user:
             if not smtp.has_extn('auth'):
                 raise SMTPConfigurationError('SMTP_AUTH_UNSUPPORTED')
-            smtp.login(settings.smtp_user, settings.smtp_password)
+            try:
+                smtp.login(settings.smtp_user.strip(), smtp_password())
+            except smtplib.SMTPAuthenticationError:
+                raise SMTPConfigurationError('SMTP_AUTH_FAILED') from None
+    except BaseException:
+        smtp.close()
+        raise
+    return smtp
+
+
+def deliver_smtp(msg, event_id):
+    with closing(open_smtp()) as smtp:
         smtp.send_message(msg)
         # A successful DATA reply means the server has accepted this message.
         # Failure to end the session must not cause the outbox to resend it.
@@ -136,21 +182,13 @@ def deliver_smtp(msg, event_id):
             log.warning('SMTP_QUIT_FAILED event_id=%s error_class=%s', event_id, type(error).__name__)
 
 
-def send_confirmation(job, *, transport=None):
-    """Return the provider message ID recorded as delivery evidence."""
-    message = build_confirmation(job)
-    if settings.gmail_transport == 'dev-smtp':
-        # Local preview only: same message, delivered to Mailpit and labelled as not Gmail.
-        deliver_smtp(message, job['id'])
-        return 'dev-smtp:' + message['Message-ID'].strip('<>')
-    return send_message(message, transport=transport)
-
-
-def deliver(job):
-    if job['type'] == CONFIRMATION_TYPE:
-        return send_confirmation(job)
-    send_smtp(job)
-    return None
+def deliver(job, *, transport=None):
+    """Send one outbox event and return the message ID kept as delivery evidence."""
+    message = build_message(job)
+    if settings.gmail_transport == 'api':
+        return send_message(message, transport=transport)
+    deliver_smtp(message, job['id'])
+    return 'smtp:' + message['Message-ID'].strip('<>')
 
 
 def finish(job, error=None, provider_message_id=None):
@@ -162,7 +200,7 @@ def finish(job, error=None, provider_message_id=None):
         else:
             # Configuration and authorization errors are recorded at once instead of retried.
             final = job['attempt_count'] >= 3 or getattr(error, 'permanent', False)
-            values.update(status='FAILED' if final else 'PENDING', last_error=smtp_error_code(error)[:120])
+            values.update(status='FAILED' if final else 'PENDING', last_error=error_code(error)[:120])
             if not final:
                 values['next_attempt_at'] = at + timedelta(minutes=1 if job['attempt_count'] == 1 else 5)
         return db.execute(update(NotificationOutbox).where(NotificationOutbox.id == job['id'],
@@ -182,11 +220,11 @@ def process_one():
         error = exc
     owned = finish(job, error, provider_message_id)
     log.info(json.dumps({'event_id': job['id'], 'type': job['type'], 'attempt': job['attempt_count'], 'owned': owned,
-                         'transport': ('gmail_api' if settings.gmail_transport == 'api' else 'dev_smtp')
-                         if job['type'] == CONFIRMATION_TYPE else 'smtp',
+                         'transport': 'gmail_api' if settings.gmail_transport == 'api' else 'smtp',
                          'error_class': type(error).__name__ if error else None,
-                         'error_code': smtp_error_code(error) if error else None,
-                         'hint': SMTP_HINTS.get(smtp_error_code(error)) if error else None}, ensure_ascii=False))
+                         'error_code': error_code(error) if error else None,
+                         'hint': (GMAIL_HINTS.get(error_code(error)) or SMTP_HINTS.get(error_code(error)))
+                         if error else None}, ensure_ascii=False))
     return True
 
 

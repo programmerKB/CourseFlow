@@ -17,12 +17,6 @@ x-backend: &backend
     INITIAL_START_AT: ${INITIAL_START_AT:-}
     INITIAL_END_AT: ${INITIAL_END_AT:-}
     CHAT_STUB: ${CHAT_STUB:-false}
-    SMTP_HOST: ${SMTP_HOST:-mailpit}
-    SMTP_PORT: ${SMTP_PORT:-1025}
-    SMTP_USER: ${SMTP_USER:-}
-    SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-    SMTP_FROM: ${SMTP_FROM:-courses@example.test}
-    SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
     # Both assistants use the local Llama 3.2 3B (the ollama service below, Ollama on the Windows
     # host, or any compatible endpoint). No cloud language model is used.
     LLAMA_BASE_URL: ${LLAMA_BASE_URL-http://ollama:11434}
@@ -33,8 +27,15 @@ x-backend: &backend
     # Voice input: faster-whisper inside the API container (model chosen at build time above).
     WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-2}
     WHISPER_PRELOAD: ${WHISPER_PRELOAD:-true}
-    # Registration confirmations are sent with the Gmail API (OAuth refresh token, gmail.send scope).
-    GMAIL_TRANSPORT: ${GMAIL_TRANSPORT:-api}
+    # Email: Gmail SMTP with an app password by default (smtp.gmail.com:587, STARTTLS). Without an
+    # account the mail goes to the bundled Mailpit. GMAIL_TRANSPORT=api uses the Gmail API instead.
+    GMAIL_TRANSPORT: ${GMAIL_TRANSPORT:-smtp}
+    SMTP_HOST: ${SMTP_HOST:-mailpit}
+    SMTP_PORT: ${SMTP_PORT:-1025}
+    SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+    SMTP_USER: ${SMTP_USER:-}
+    SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+    SMTP_FROM: ${SMTP_FROM:-}
     GMAIL_CLIENT_ID: ${GMAIL_CLIENT_ID:-}
     GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:-}
     GMAIL_REFRESH_TOKEN: ${GMAIL_REFRESH_TOKEN:-}
